@@ -4,9 +4,6 @@
 import std;
 import splice;
 import cairn;
-#if CAIRN_SCAN
-import cairn.scan;
-#endif
 import gtest;
 
 #include "gtest/gtest-macros.h"
@@ -110,14 +107,6 @@ TEST(Allocations, NoneToFoldNames) {
   }), 0u);
 }
 
-#if CAIRN_SCAN
-TEST(Allocations, NoneToReadWithScan) {
-  EXPECT_EQ(asked([] {
-    const auto v = cairn::try_parse<cairn::grammars::scan>(wire);
-    if (!v || v->param(0) != "#mux") throw 1;
-  }), 0u);
-}
-#endif
 
 // The count sees what is asked: the owning API asks, and is counted.
 TEST(Allocations, TheOwningWayIsCounted) {

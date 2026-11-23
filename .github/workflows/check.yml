@@ -46,7 +46,7 @@ jobs:
       - name: clang and libc++
         run: |
           sudo apt-get update || true
-          sudo apt-get install -y ninja-build re2c lsb-release software-properties-common gnupg curl
+          sudo apt-get install -y ninja-build lsb-release software-properties-common gnupg curl
           curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh ${{ matrix.llvm }}
@@ -91,7 +91,7 @@ jobs:
             -DCMAKE_CXX_COMPILER=/usr/local/bin/clang++ \
             -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
             -DCAIRN_CONSTEXPR_STEPS=2000000000 \
-            -DCAIRN_RE2C=ON -DCAIRN_BENCHMARKS=ON
+            -DCAIRN_BENCHMARKS=ON
           cmake --build build
 
       - name: test

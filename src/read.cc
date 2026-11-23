@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// cairn.read -- Lines read, by a grammar the caller names, each made from
-// cairn.grammar's description of a line: by_hand walks it, std_regex is the
-// regular expression it comes to. The same lines, views into the text, and
-// the same errors; thrown or handed back; from text or any input range.
+// cairn.read -- Lines read by walking cairn.grammar's description of a line:
+// views into the text and the description's errors; thrown or handed back;
+// from text or any input range.
 export module cairn.read;
 
 import std;
@@ -39,66 +38,6 @@ struct by_hand {
   }
 };
 
-// The description as std::regex: a regular expression for each part of the
-// line, made from it while the program compiles (the text) and once when the
-// program first reads (the automaton). A list -- the parameters -- read a
-// turn at a time, as no group of one keeps more than its last. Where the
-// line is not one, the error is the description's, walked.
-struct std_regex {
- private:
-  template <class Tuple, std::size_t... I>
-  static void assign(grammar::raw& got, const std::match_results<std::string_view::const_iterator>& m, std::index_sequence<I...>) {
-    (([&] {
-       constexpr auto field = std::tuple_element_t<I, Tuple>::value;
-       if (!m[I + 1].matched) return;
-       const std::string_view text(m[I + 1].first, m[I + 1].second);
-       got.*field = text;
-     }()),
-     ...);
-  }
-  template <class Tuple, std::size_t... I> static void raise(grammar::raw& got, std::index_sequence<I...>) {
-    ((got.*(std::tuple_element_t<I, Tuple>::value) = true), ...);
-  }
-  // One part, read at `at`: whether it read.
-  template <class N> static bool part(std::string_view in, std::string_view::const_iterator& at, grammar::raw& got) {
-    static const std::regex expression(grammar::regex<N>());
-    std::match_results<std::string_view::const_iterator> m;
-    if (!std::regex_search(at, in.end(), m, expression, std::regex_constants::match_continuous)) return false;
-    using fields = typename grammar::captures_of<N>::type;
-    assign<fields>(got, m, std::make_index_sequence<std::tuple_size_v<fields>>{});
-    using flags = typename grammar::flags_of<N>::type;
-    raise<flags>(got, std::make_index_sequence<std::tuple_size_v<flags>>{});
-    at = m[0].second;
-    return true;
-  }
-  template <class N> struct top { static bool go(std::string_view in, std::string_view::const_iterator& at, grammar::raw& got) { return part<N>(in, at, got); } };
-  template <class N> struct top<grammar::opt<N>> {
-    static bool go(std::string_view in, std::string_view::const_iterator& at, grammar::raw& got) { return part<N>(in, at, got), true; }
-  };
-  template <class N> struct top<grammar::many<N>> {
-    static bool go(std::string_view in, std::string_view::const_iterator& at, grammar::raw& got) {
-      while (at != in.end() && part<N>(in, at, got)) {}
-      return true;
-    }
-  };
-  template <class... N> static bool all(std::string_view in, grammar::seq<N...>*, grammar::raw& got) {
-    auto at = in.begin();
-    return (top<N>::go(in, at, got) && ...) && at == in.end();
-  }
-
- public:
-  // The regular expressions alone: a line, or none where they do not read it.
-  static std::optional<line_view> read_alone(std::string_view in) {
-    in = detail::without_line_end(in);
-    grammar::raw got;
-    if (!all(in, static_cast<grammar::line*>(nullptr), got)) return std::nullopt;
-    return detail::assemble(got);
-  }
-  static std::expected<line_view, line_error> try_parse(std::string_view in) {
-    if (auto got = read_alone(in)) return *std::move(got);
-    return by_hand::try_parse(in);
-  }
-};
 }  // namespace grammars
 
 template <class Grammar = grammars::by_hand>
