@@ -17,3 +17,4 @@ export import cairn.session;
 export import cairn.channels;
 export import cairn.format;
 export import cairn.outgoing;
+export import cairn.text;

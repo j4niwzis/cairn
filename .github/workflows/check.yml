@@ -50,7 +50,7 @@ jobs:
           curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh ${{ matrix.llvm }}
-          sudo apt-get install -y libc++-${{ matrix.llvm }}-dev libc++abi-${{ matrix.llvm }}-dev
+          sudo apt-get install -y libc++-${{ matrix.llvm }}-dev libc++abi-${{ matrix.llvm }}-dev libclang-rt-${{ matrix.llvm }}-dev
 
       - name: cmake
         run: |
@@ -85,14 +85,40 @@ jobs:
           key: build-${{ runner.os }}-clang${{ matrix.llvm }}-${{ env.COMPILER_BUILD }}-${{ github.sha }}
           restore-keys: build-${{ runner.os }}-clang${{ matrix.llvm }}-${{ env.COMPILER_BUILD }}-
 
+      # alef is private: where the ALEF_TOKEN secret is there, git reads
+      # github.com/j4niwzis/alef with it, and cairn.precis is built on it.
+      - name: alef, where it can be read
+        env:
+          ALEF_TOKEN: ${{ secrets.ALEF_TOKEN }}
+        run: |
+          if [ -n "$ALEF_TOKEN" ]; then
+            git config --global url."https://x-access-token:${ALEF_TOKEN}@github.com/j4niwzis/alef".insteadOf "https://github.com/j4niwzis/alef"
+            echo "CAIRN_UNICODE=ON" >> "$GITHUB_ENV"
+          else
+            echo "CAIRN_UNICODE=OFF" >> "$GITHUB_ENV"
+          fi
+
       - name: build
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCAIRN_UNICODE=${{ env.CAIRN_UNICODE }} \
             -DCMAKE_CXX_COMPILER=/usr/local/bin/clang++ \
             -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
             -DCAIRN_CONSTEXPR_STEPS=2000000000 \
-            -DCAIRN_BENCHMARKS=ON
+            -DCAIRN_BENCHMARKS=ON \
+            -DCAIRN_FUZZ=ON
           cmake --build build
 
       - name: test
         run: ctest --test-dir build --output-on-failure
+
+      # A minute of fuzzing the parser, from a few lines of each shape.
+      - name: fuzz
+        run: |
+          mkdir -p fuzz/corpus
+          printf '@a=b\\sc;d :n!u@h PRIVMSG #x :hi there\r\n' > fuzz/corpus/tags
+          printf ':srv 005 me CASEMAPPING=ascii :are supported\r\n' > fuzz/corpus/numeric
+          printf 'CAP * LS * :sasl=PLAIN,EXTERNAL batch\r\n' > fuzz/corpus/cap
+          printf 'CHATHISTORY BETWEEN #x msgid=a timestamp=2019-01-04T14:33:26.123Z 10\r\n' > fuzz/corpus/history
+          printf 'PRIVMSG #x :\001ACTION waves\001\r\n' > fuzz/corpus/ctcp
+          ./build/cairn-parse-fuzz -max_total_time=60 -max_len=1024 fuzz/corpus

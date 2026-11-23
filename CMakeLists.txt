@@ -29,15 +29,32 @@ cme_declare_port(NAME splice PROVIDES splice
 cme_options(splice "SPLICE_TESTS OFF")
 cme_find_package(splice REQUIRED)
 
+# alef (optional): Unicode for CASEMAPPING=rfc7613 -- the PRECIS
+# UsernameCaseMapped profile -- in cairn.precis. Only its precis component
+# and what that imports are built.
+option(CAIRN_UNICODE "Build cairn.precis on alef, for CASEMAPPING=rfc7613" OFF)
+if(CAIRN_UNICODE)
+  cme_declare_port(NAME alef PROVIDES alef
+    GITHUB_REPOSITORY j4niwzis/alef
+    GIT_TAG 231e934f78a6757a4fa7bacf17d518a193cfe74d
+    LICENSE AGPL-3.0-only
+    TARGETS alef)
+  cme_find_package(alef REQUIRED COMPONENTS precis)
+endif()
+
 set(CAIRN_CONSTEXPR_STEPS 100000000 CACHE STRING
   "clang's -fconstexpr-steps for cairn and what imports it, as its family sets it")
 
 # One library, its modules in one file set.
 add_library(cairn)
 target_sources(cairn PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/line.cc src/grammar.cc src/read.cc src/casemap.cc src/isupport.cc src/messages.cc src/numerics.cc src/crypto.cc src/sasl.cc src/client.cc src/session.cc src/channels.cc src/format.cc src/outgoing.cc src/cairn.cc)
+  FILES src/line.cc src/grammar.cc src/read.cc src/casemap.cc src/isupport.cc src/messages.cc src/numerics.cc src/crypto.cc src/sasl.cc src/client.cc src/session.cc src/channels.cc src/format.cc src/outgoing.cc src/text.cc src/cairn.cc)
 target_compile_features(cairn PUBLIC cxx_std_26)
 target_link_libraries(cairn PUBLIC splice)
+if(CAIRN_UNICODE)
+  target_sources(cairn PUBLIC FILE_SET CXX_MODULES BASE_DIRS src FILES src/precis.cc)
+  target_link_libraries(cairn PUBLIC alef)
+endif()
 target_compile_options(cairn PUBLIC
   $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fconstexpr-steps=${CAIRN_CONSTEXPR_STEPS}>)
 add_library(cairn::cairn ALIAS cairn)
@@ -73,11 +90,24 @@ if(CAIRN_TESTS)
   else()
     set(cairn_gtest gtest_main)
   endif()
-  foreach(name IN ITEMS line messages client channels format outgoing parser session allocations)
+  set(cairn_tests line messages client channels format outgoing text parser session allocations)
+  if(CAIRN_UNICODE)
+    list(APPEND cairn_tests precis)
+  endif()
+  foreach(name IN LISTS cairn_tests)
     add_executable(cairn-${name}-test test/${name}_test.cc)
     target_link_libraries(cairn-${name}-test PRIVATE cairn ${cairn_gtest})
     add_test(NAME ${name} COMMAND cairn-${name}-test)
   endforeach()
+endif()
+
+# libFuzzer over the parser (fuzz/parse_fuzz.cc): clang's -fsanitize=fuzzer.
+option(CAIRN_FUZZ "Build the parser's fuzzer" OFF)
+if(CAIRN_FUZZ)
+  add_executable(cairn-parse-fuzz fuzz/parse_fuzz.cc)
+  target_link_libraries(cairn-parse-fuzz PRIVATE cairn)
+  target_compile_options(cairn-parse-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+  target_link_options(cairn-parse-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
 endif()
 
 # How fast each grammar reads lines (benchmarks/parse_benchmark.cc).
