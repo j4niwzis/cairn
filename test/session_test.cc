@@ -76,6 +76,21 @@ static_assert([] {
   const auto got = s.request(msg::whois{params_rest{"nobody"}}, "WHOIS", on);
   return got && got->lines.size() == 1 && try_parse(got->lines[0])->number() == 401;
 }());
+// CHATHISTORY without labeled-response: answered by its batch.
+static_assert([] {
+  scripted wire{":srv CAP * LS :batch\r\n:srv CAP * ACK :batch\r\n:srv 001 me :Welcome\r\n"
+                ":srv NOTICE me :before\r\n:srv BATCH +h1 chathistory #mux\r\n@batch=h1 :a!u@h PRIVMSG #mux :one\r\n"
+                "@batch=h1 :b!u@h PRIVMSG #mux :two\r\n:srv BATCH -h1\r\n"};
+  std::array<char, 512> room{};
+  session s(wire, registration{.nick = "me", .caps = {"batch"}}, room);
+  int notices = 0;
+  const auto on = [&](const event_t& e) {
+    if (const auto* r = e.template get_if<events::received>(); r && r->what.what.template get_if<msg::notice>()) ++notices;
+  };
+  if (!s.connect(on)) return false;
+  const auto got = s.request(msg::chathistory{msg::history::latest{"#mux", msg::history::none{}, 50}}, "CHATHISTORY", on);
+  return got && got->lines.size() == 2 && notices == 1 && try_parse(got->lines[1])->param(1) == "two";
+}());
 }  // namespace
 
 TEST(Session, ConnectsWhenRun) {

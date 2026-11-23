@@ -71,7 +71,11 @@ static_assert(as<msg::user>(got("USER alice 0 * :Alice A")).realname == "Alice A
 static_assert(strings(as<msg::names>(got("NAMES #a,#b")).channels) == v{"#a", "#b"});
 static_assert(strings(as<msg::whois>(got("WHOIS irc.example.net alice")).targets) == v{"irc.example.net", "alice"});
 static_assert(strings(as<msg::monitor>(got("MONITOR + alice,bob")).targets) == v{"alice", "bob"});
-static_assert(strings(as<msg::chathistory>(got("CHATHISTORY BEFORE #mux msgid=abc 50")).params) == v{"#mux", "msgid=abc", "50"});
+static_assert([] {
+  const auto q = as<msg::chathistory>(got("CHATHISTORY BEFORE #mux msgid=abc 50")).query;
+  const auto* b = q.template get_if<msg::history::before>();
+  return b && b->target == "#mux" && b->limit == 50 && b->at.template get_if<msg::history::msgid>()->value == "abc";
+}());
 static_assert(is<msg::rehash>(got("REHASH")));
 static_assert(strings(as<msg::fail>(got("FAIL CHATHISTORY INVALID_TARGET #nope :No such channel")).context()) == v{"#nope"});
 static_assert(as<msg::fail>(got("FAIL CHATHISTORY INVALID_TARGET #nope :No such channel")).description() == "No such channel");
@@ -104,7 +108,7 @@ static_assert([] {
 }());
 static_assert([] {
   constexpr std::array<std::string_view, 3> p{"#mux", "*", "100"};
-  return write(msg::chathistory{"LATEST", params_rest{{}, p}}) == "CHATHISTORY LATEST #mux * 100\r\n";
+  return write(msg::chathistory{msg::history::latest{"#mux", msg::history::none{}, 100}}) == "CHATHISTORY LATEST #mux * 100\r\n";
 }());
 static_assert(write(msg::pong{"irc.example.com"}) == "PONG irc.example.com\r\n");
 static_assert(write(msg::user{"alice", "0", "*", "Alice A"}) == "USER alice 0 * :Alice A\r\n");
@@ -119,6 +123,30 @@ static_assert(*numerics::name_of(1) == "RPL_WELCOME");
 static_assert(*numerics::name_of(433) == "ERR_NICKNAMEINUSE");
 static_assert(*numerics::number_of("RPL_ENDOFNAMES") == 366);
 static_assert(!numerics::name_of(999));
+// CHATHISTORY read into its query's type, and written back the same.
+static_assert([] {
+  constexpr std::string_view lines[] = {
+      "CHATHISTORY LATEST #mux * 50\r\n",
+      "CHATHISTORY BEFORE #mux timestamp=2019-01-04T14:33:26.123Z 20\r\n",
+      "CHATHISTORY AFTER #mux msgid=abc 20\r\n",
+      "CHATHISTORY BETWEEN #mux msgid=a timestamp=2019-01-04T14:33:26.123Z 10\r\n",
+      "CHATHISTORY TARGETS timestamp=2019-01-01T00:00:00.000Z timestamp=2019-02-01T00:00:00.000Z 30\r\n"};
+  for (std::string_view one : lines) {
+    const message m = read(*try_parse(one));
+    if (!m.what.template get_if<msg::chathistory>() || write(m.what) != one) return false;
+  }
+  const message m = read(*try_parse("CHATHISTORY BEFORE #mux msgid=xyz 5"));
+  const auto& b = m.what.template get_if<msg::chathistory>()->query.template get_if<msg::history::before>();
+  return b && b->target == "#mux" && b->limit == 5 && b->at.template get_if<msg::history::msgid>()->value == "xyz";
+}());
+// REDACT and MARKREAD, both ways.
+static_assert(write(msg::redact{"#mux", "abc", "spam"}) == "REDACT #mux abc spam\r\n");
+static_assert(write(msg::markread{"#mux", "timestamp=2019-01-04T14:33:26.123Z"}) == "MARKREAD #mux timestamp=2019-01-04T14:33:26.123Z\r\n");
+static_assert([] {
+  const message m = read(*try_parse(":srv MARKREAD #mux timestamp=2019-01-04T14:33:26.123Z"));
+  const auto* r = m.what.template get_if<msg::markread>();
+  return r && r->target == "#mux" && r->timestamp == "timestamp=2019-01-04T14:33:26.123Z";
+}());
 }  // namespace
 
 TEST(Messages, ActionReadWhenRun) {

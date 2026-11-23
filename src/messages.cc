@@ -245,7 +245,27 @@ struct help { text subject; };
 struct knock { text channel, body; };
 struct silence { params_rest masks; };
 struct monitor { text action; commas targets; };  // + - C L S
-struct chathistory { text subcommand; params_rest params; };
+// CHATHISTORY (IRCv3 chathistory): each query a type of its own, its
+// points read once into types -- a time, a message id, or none ('*').
+namespace history {
+struct none {};                  // *
+struct timestamp { text value; };  // timestamp=2019-01-04T14:33:26.123Z
+struct msgid { text value; };      // msgid=...
+using point = spl::variant<none, timestamp, msgid>;
+constexpr point point_of(std::string_view s) {
+  if (s.starts_with("timestamp=")) return timestamp{s.substr(10)};
+  if (s.starts_with("msgid=")) return msgid{s.substr(6)};
+  return none{};
+}
+struct latest { text target; point after; unsigned limit = 0; };   // LATEST target <* | point> limit
+struct before { text target; point at; unsigned limit = 0; };      // BEFORE target point limit
+struct after { text target; point at; unsigned limit = 0; };
+struct around { text target; point at; unsigned limit = 0; };
+struct between { text target; point from, to; unsigned limit = 0; };
+struct targets { point from, to; unsigned limit = 0; };             // TARGETS timestamp timestamp limit
+using query = spl::variant<latest, before, after, around, between, targets>;
+}  // namespace history
+struct chathistory { history::query query; };
 struct redact { text target, msgid, reason; };
 struct markread { text target, timestamp; };
 struct webirc { text password, gateway, hostname, ip; };
@@ -476,7 +496,6 @@ using commands = std::tuple<
     command<"KNOCK", msg::knock, "{channel} {text?}">,
     command<"SILENCE", msg::silence, "{masks...}">,
     command<"MONITOR", msg::monitor, "{action} {targets,?}">,
-    command<"CHATHISTORY", msg::chathistory, "{subcommand} {params...}">,
     command<"REDACT", msg::redact, "{target} {msgid} {reason?}">,
     command<"MARKREAD", msg::markread, "{target} {timestamp?}">,
     command<"WEBIRC", msg::webirc, "{password} {gateway} {hostname} {ip}">,
@@ -494,6 +513,56 @@ struct command_for<T, std::tuple<First, Rest...>>
 template <class T, class Table = commands> using command_for_t = typename command_for<T, Table>::type;
 
 // What a line says: views into it.
+namespace detail {
+constexpr unsigned limit_of(std::string_view s) {
+  unsigned n = 0;
+  for (char c : s) {
+    if (c < '0' || c > '9') return 0;
+    n = n * 10 + static_cast<unsigned>(c - '0');
+  }
+  return n;
+}
+// The subcommand read once, by a table, into its type.
+constexpr std::optional<msg::history::query> history_query_of(const line_view& l) {
+  using namespace msg::history;
+  const auto p = [&](std::size_t i) { return l.param(i); };
+  using make = msg::history::query (*)(const line_view&);
+  constexpr std::array<std::pair<std::string_view, make>, 6> table{{
+      {"LATEST", [](const line_view& m) -> query { return latest{m.param(1), point_of(m.param(2)), limit_of(m.param(3))}; }},
+      {"BEFORE", [](const line_view& m) -> query { return before{m.param(1), point_of(m.param(2)), limit_of(m.param(3))}; }},
+      {"AFTER", [](const line_view& m) -> query { return after{m.param(1), point_of(m.param(2)), limit_of(m.param(3))}; }},
+      {"AROUND", [](const line_view& m) -> query { return around{m.param(1), point_of(m.param(2)), limit_of(m.param(3))}; }},
+      {"BETWEEN", [](const line_view& m) -> query {
+         return between{m.param(1), point_of(m.param(2)), point_of(m.param(3)), limit_of(m.param(4))};
+       }},
+      {"TARGETS", [](const line_view& m) -> query { return targets{point_of(m.param(1)), point_of(m.param(2)), limit_of(m.param(3))}; }},
+  }};
+  for (const auto& [name, f] : table)
+    if (command_is(p(0), name)) return f(l);
+  return std::nullopt;
+}
+template <class Out> constexpr void put_point(Out& out, const msg::history::point& at, bool last) {
+  spl::visit(spl::overloaded{[&](msg::history::none) { param(out, "*", last); },
+                             [&](const msg::history::timestamp& t) {
+                               out.append(" timestamp=");
+                               out.append(t.value);
+                             },
+                             [&](const msg::history::msgid& m) {
+                               out.append(" msgid=");
+                               out.append(m.value);
+                             }},
+             at);
+}
+template <class Out> constexpr void put_limit(Out& out, unsigned n) {
+  char digits[10];
+  int k = 0;
+  do digits[k++] = static_cast<char>('0' + n % 10), n /= 10;
+  while (n);
+  out.append(" ");
+  while (k) out.append(std::string_view(&digits[--k], 1));
+}
+}  // namespace detail
+
 constexpr message read(const line_view& l) {
   const auto p = [&](std::size_t i) { return l.param(i); };
   message_t what = msg::unknown{};
@@ -521,6 +590,8 @@ constexpr message read(const line_view& l) {
     what = msg::warn{{p(0), p(1), detail::rest_from(l, 2)}};
   } else if (l.is("NOTE")) {
     what = msg::note{{p(0), p(1), detail::rest_from(l, 2)}};
+  } else if (l.is("CHATHISTORY")) {
+    if (auto q = detail::history_query_of(l)) what = msg::chathistory{*q};
   } else if (l.is("BATCH")) {
     const std::string_view ref = p(0);
     what = msg::batch{!ref.empty() && ref.front() == '+', ref.empty() ? ref : ref.substr(1), p(1), detail::rest_from(l, 2)};
@@ -545,6 +616,34 @@ template <class Out> constexpr void write(const message_t& m, Out& out) {
                  [&]<class T>(const T& x)
                    requires(command_of<T>::count == 1)
                  { command_for_t<T>::write(x, out); },
+                 [&](const msg::chathistory& x) {
+                   using namespace msg::history;
+                   out.append("CHATHISTORY");
+                   const auto one = [&](std::string_view sub, std::string_view target, const point& at, unsigned limit) {
+                     out.append(" "), out.append(sub);
+                     detail::param(out, target, false);
+                     detail::put_point(out, at, false);
+                     detail::put_limit(out, limit);
+                   };
+                   spl::visit(spl::overloaded{
+                                  [&](const latest& q) { one("LATEST", q.target, q.after, q.limit); },
+                                  [&](const before& q) { one("BEFORE", q.target, q.at, q.limit); },
+                                  [&](const after& q) { one("AFTER", q.target, q.at, q.limit); },
+                                  [&](const around& q) { one("AROUND", q.target, q.at, q.limit); },
+                                  [&](const between& q) {
+                                    out.append(" BETWEEN");
+                                    detail::param(out, q.target, false);
+                                    detail::put_point(out, q.from, false), detail::put_point(out, q.to, false);
+                                    detail::put_limit(out, q.limit);
+                                  },
+                                  [&](const targets& q) {
+                                    out.append(" TARGETS");
+                                    detail::put_point(out, q.from, false), detail::put_point(out, q.to, false);
+                                    detail::put_limit(out, q.limit);
+                                  }},
+                              x.query);
+                   out.append("\r\n");
+                 },
                  [&](const msg::privmsg& x) {
                    out.append("PRIVMSG");
                    detail::param(out, x.target, false);

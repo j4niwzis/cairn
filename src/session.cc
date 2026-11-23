@@ -38,7 +38,11 @@ namespace detail {
 // well. Any other numeric is not its, and is handed on.
 struct answered_by {
   std::span<const int> parts, ends;
+  // Or a batch of one of these types: its lines the answer, its end the end
+  // (CHATHISTORY's chathistory and draft/chathistory-targets).
+  std::span<const std::string_view> batches = {};
 };
+inline constexpr std::array<std::string_view, 2> history_batches{"chathistory", "draft/chathistory-targets"};
 inline constexpr std::array who_parts{352, 354};
 inline constexpr std::array who_ends{315};
 inline constexpr std::array names_parts{353};
@@ -53,6 +57,7 @@ inline constexpr std::array motd_ends{376, 422};
 // such command, not allowed, try again.
 inline constexpr std::array errors{401, 402, 403, 406, 421, 461, 481, 263};
 constexpr std::optional<answered_by> answers_to(std::string_view command) {
+  if (command == "CHATHISTORY") return answered_by{{}, {}, history_batches};
   if (command == "WHO") return answered_by{who_parts, who_ends};
   if (command == "NAMES") return answered_by{names_parts, names_ends};
   if (command == "WHOIS") return answered_by{whois_parts, whois_ends};
@@ -138,6 +143,23 @@ template <transport T> class session {
         }
         if (tagged("label", label)) {
           if (!l->is("ACK")) keep(*l);
+          return got;
+        }
+      } else if (by && !by->batches.empty()) {
+        // Its batch opened, gathered, closed; a FAIL for it ends it too.
+        if (batch.empty() && l->is("BATCH") && l->param(0).size() > 1 && l->param(0).front() == '+' &&
+            std::ranges::contains(by->batches, l->param(1))) {
+          batch = std::string(l->param(0).substr(1));
+          continue;
+        }
+        if (!batch.empty() && l->is("BATCH") && l->param(0).size() > 1 && l->param(0).front() == '-' && l->param(0).substr(1) == batch)
+          return got;
+        if (!batch.empty() && tagged("batch", batch)) {
+          keep(*l);
+          continue;
+        }
+        if (l->is("FAIL") && l->param(0) == command) {
+          keep(*l);
           return got;
         }
       } else if (by && l->numeric()) {
