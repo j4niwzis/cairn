@@ -14,7 +14,7 @@ enum class casemapping {
   strict_rfc1459,  // A-Z and []\ as {}|, not ~ and ^
 };
 
-[[nodiscard]] constexpr std::optional<casemapping> casemapping_named(std::string_view name) {
+constexpr std::optional<casemapping> casemapping_named(std::string_view name) {
   if (name == "ascii") return casemapping::ascii;
   if (name == "rfc1459") return casemapping::rfc1459;
   if (name == "strict-rfc1459") return casemapping::strict_rfc1459;
@@ -23,7 +23,7 @@ enum class casemapping {
   return std::nullopt;
 }
 
-[[nodiscard]] constexpr char fold(char c, casemapping m) {
+constexpr char fold(char c, casemapping m) {
   if (c >= 'A' && c <= 'Z') return static_cast<char>(c - 'A' + 'a');
   if (m == casemapping::ascii) return c;
   switch (c) {
@@ -34,12 +34,12 @@ enum class casemapping {
     default: return c;
   }
 }
-[[nodiscard]] constexpr std::string fold(std::string_view s, casemapping m) {
+constexpr std::string fold(std::string_view s, casemapping m) {
   std::string out(s);
   for (char& c : out) c = fold(c, m);
   return out;
 }
-[[nodiscard]] constexpr bool equal(std::string_view a, std::string_view b, casemapping m) {
+constexpr bool equal(std::string_view a, std::string_view b, casemapping m) {
   return a.size() == b.size() && std::ranges::equal(a, b, [m](char x, char y) { return fold(x, m) == fold(y, m); });
 }
 

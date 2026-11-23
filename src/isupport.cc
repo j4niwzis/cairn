@@ -41,28 +41,28 @@ struct isupport {
   bool whox = false;
   std::optional<char> bot;
 
-  [[nodiscard]] constexpr const std::string* token(std::string_view key) const {
+  constexpr const std::string* token(std::string_view key) const {
     for (const auto& [k, v] : tokens)
       if (k == key) return &v;
     return nullptr;
   }
-  [[nodiscard]] constexpr bool has(std::string_view key) const { return token(key) != nullptr; }
-  [[nodiscard]] constexpr bool is_channel(std::string_view name) const {
+  constexpr bool has(std::string_view key) const { return token(key) != nullptr; }
+  constexpr bool is_channel(std::string_view name) const {
     return !name.empty() && chantypes.find(name.front()) != std::string::npos;
   }
   // The status a symbol stands for, or none.
-  [[nodiscard]] constexpr std::optional<prefix_mode> by_symbol(char symbol) const {
+  constexpr std::optional<prefix_mode> by_symbol(char symbol) const {
     for (const prefix_mode& p : prefixes)
       if (p.symbol == symbol) return p;
     return std::nullopt;
   }
-  [[nodiscard]] constexpr std::optional<prefix_mode> by_mode(char mode) const {
+  constexpr std::optional<prefix_mode> by_mode(char mode) const {
     for (const prefix_mode& p : prefixes)
       if (p.mode == mode) return p;
     return std::nullopt;
   }
   // How a mode letter takes an argument when set (+) or unset (-).
-  [[nodiscard]] constexpr bool takes_argument(char mode, bool set) const {
+  constexpr bool takes_argument(char mode, bool set) const {
     if (by_mode(mode)) return true;
     if (chanmodes.lists.find(mode) != std::string::npos || chanmodes.always.find(mode) != std::string::npos) return true;
     if (chanmodes.when_set.find(mode) != std::string::npos) return set;
@@ -95,7 +95,7 @@ struct isupport {
   }
 
   // \xHH, as ISUPPORT escapes a value.
-  [[nodiscard]] static constexpr std::string unescape(std::string_view in) {
+  static constexpr std::string unescape(std::string_view in) {
     std::string out;
     const auto hex = [](char c) -> int {
       if (c >= '0' && c <= '9') return c - '0';

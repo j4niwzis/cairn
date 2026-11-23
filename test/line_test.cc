@@ -58,6 +58,15 @@ static_assert(write(make("PRIVMSG", "a b", "x")).error() == line_error::bad_para
 static_assert(write(make("PRIVMSG", "#c", "a\r\nQUIT")).error() == line_error::bad_character);
 static_assert(write(make("PRIVMSG", "#c", std::string(500, 'x'))).error() == line_error::body_too_long);
 static_assert(write(make("PRIVMSG", "#c", std::string(490, 'x'))).has_value());
+// Into the caller's buffer: appended; refused, the buffer as it was.
+static_assert([] {
+  std::string out = "PING x\r\n";
+  return write(make("JOIN", "#c"), out).has_value() && out == "PING x\r\nJOIN #c\r\n";
+}());
+static_assert([] {
+  std::string out = "PING x\r\n";
+  return !write(make("PRIVMSG", "a b", "x"), out) && out == "PING x\r\n";
+}());
 // Read back as written.
 static_assert(parsed(written(line{{{"a", "b c;d\\"}}, source{"n", "u", "h"}, "PRIVMSG", {"#c", "x y"}})) ==
               line{{{"a", "b c;d\\"}}, source{"n", "u", "h"}, "PRIVMSG", {"#c", "x y"}});

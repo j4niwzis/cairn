@@ -19,7 +19,7 @@ enum class line_error {
   bad_parameter,      // a middle parameter empty, with a space, or starting with ':'
   bad_character,      // CR, LF or NUL inside what is written
 };
-[[nodiscard]] constexpr std::string_view describe(line_error e) {
+constexpr std::string_view describe(line_error e) {
   switch (e) {
     case line_error::empty: return "empty line";
     case line_error::bad_tags: return "tags marker with no tags";
@@ -41,7 +41,7 @@ inline constexpr std::size_t max_body_bytes = 512;
 struct tag {
   std::string key;
   std::string value;
-  [[nodiscard]] constexpr bool client_only() const { return !key.empty() && key.front() == '+'; }
+  constexpr bool client_only() const { return !key.empty() && key.front() == '+'; }
   friend constexpr bool operator==(const tag&, const tag&) = default;
 };
 
@@ -51,7 +51,7 @@ struct source {
   std::string nick;  // or the server's name
   std::string user;
   std::string host;
-  [[nodiscard]] constexpr bool empty() const { return nick.empty() && user.empty() && host.empty(); }
+  constexpr bool empty() const { return nick.empty() && user.empty() && host.empty(); }
   friend constexpr bool operator==(const source&, const source&) = default;
 };
 
@@ -61,27 +61,27 @@ struct line {
   std::string command;  // upper-cased as it came; a numeric as its three digits
   std::vector<std::string> params;
 
-  [[nodiscard]] constexpr const std::string* tag_value(std::string_view key) const {
+  constexpr const std::string* tag_value(std::string_view key) const {
     for (const tag& one : tags)
       if (one.key == key) return &one.value;
     return nullptr;
   }
-  [[nodiscard]] constexpr bool has_tag(std::string_view key) const { return tag_value(key) != nullptr; }
-  [[nodiscard]] constexpr bool numeric() const {
+  constexpr bool has_tag(std::string_view key) const { return tag_value(key) != nullptr; }
+  constexpr bool numeric() const {
     return command.size() == 3 && std::ranges::all_of(command, [](char c) { return c >= '0' && c <= '9'; });
   }
-  [[nodiscard]] constexpr int number() const {
+  constexpr int number() const {
     return numeric() ? (command[0] - '0') * 100 + (command[1] - '0') * 10 + (command[2] - '0') : 0;
   }
   // The parameter at `i`, or nothing past the end.
-  [[nodiscard]] constexpr std::string_view param(std::size_t i) const {
+  constexpr std::string_view param(std::size_t i) const {
     return i < params.size() ? std::string_view(params[i]) : std::string_view();
   }
   friend constexpr bool operator==(const line&, const line&) = default;
 };
 
 // A tag's value as the wire carries it, and back (IRCv3 message-tags).
-[[nodiscard]] constexpr std::string unescape_tag_value(std::string_view in) {
+constexpr std::string unescape_tag_value(std::string_view in) {
   std::string out;
   out.reserve(in.size());
   for (std::size_t i = 0; i < in.size(); ++i) {
@@ -101,9 +101,8 @@ struct line {
   }
   return out;
 }
-[[nodiscard]] constexpr std::string escape_tag_value(std::string_view in) {
-  std::string out;
-  out.reserve(in.size());
+// Written straight into what is being written, nothing made on the way.
+constexpr void escape_tag_value(std::string_view in, std::string& out) {
   for (char c : in) {
     switch (c) {
       case ';': out += "\\:"; break;
@@ -114,11 +113,10 @@ struct line {
       default: out += c; break;
     }
   }
-  return out;
 }
 
 // nick!user@host, or a server's name.
-[[nodiscard]] constexpr source parse_source(std::string_view in) {
+constexpr source parse_source(std::string_view in) {
   source out;
   const auto at = in.find('@');
   const std::string_view before = in.substr(0, at);
@@ -128,11 +126,10 @@ struct line {
   if (bang != std::string_view::npos) out.user = std::string(before.substr(bang + 1));
   return out;
 }
-[[nodiscard]] constexpr std::string write_source(const source& s) {
-  std::string out = s.nick;
-  if (!s.user.empty()) out += "!" + s.user;
-  if (!s.host.empty()) out += "@" + s.host;
-  return out;
+constexpr void write_source(const source& s, std::string& out) {
+  out += s.nick;
+  if (!s.user.empty()) (out += '!') += s.user;
+  if (!s.host.empty()) (out += '@') += s.host;
 }
 
 namespace detail {
@@ -158,7 +155,7 @@ constexpr char upper(char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c
 // A line, without its CR LF (a trailing CR or LF is taken off). Tags and
 // source optional; any number of spaces between parts; the last parameter
 // after ':' keeps its spaces.
-[[nodiscard]] constexpr std::expected<line, line_error> parse(std::string_view in) {
+constexpr std::expected<line, line_error> parse(std::string_view in) {
   while (!in.empty() && (in.back() == '\n' || in.back() == '\r')) in.remove_suffix(1);
   line out;
   in = detail::skip_spaces(in);
@@ -211,51 +208,67 @@ constexpr char upper(char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c
 // A line as the wire takes it, CR LF ended -- or why it cannot be: the
 // limits held before anything is written, the last parameter written after
 // ':' where it has to be (empty, a space in it, or ':' first).
-[[nodiscard]] constexpr std::expected<std::string, line_error> write(const line& l) {
+constexpr std::expected<void, line_error> write(const line& l, std::string& out) {
+  const std::size_t began = out.size();
+  const auto fail = [&](line_error e) {
+    out.resize(began);
+    return std::unexpected(e);
+  };
   const auto clean = [](std::string_view s) {
     return std::ranges::none_of(s, [](char c) { return c == '\r' || c == '\n' || c == '\0'; });
   };
-  std::string out;
   if (!l.tags.empty()) {
     out += '@';
     bool first = true;
     for (const tag& t : l.tags) {
       if (t.key.empty() || !clean(t.key) || t.key.find_first_of(" ;=") != std::string::npos)
-        return std::unexpected(line_error::bad_character);
+        return fail(line_error::bad_character);
       if (!first) out += ';';
       first = false;
       out += t.key;
-      if (!t.value.empty()) out += "=" + escape_tag_value(t.value);
+      if (!t.value.empty()) {
+        out += '=';
+        escape_tag_value(t.value, out);
+      }
     }
     out += ' ';
-    if (out.size() > max_tags_bytes) return std::unexpected(line_error::tags_too_long);
+    if (out.size() - began > max_tags_bytes) return fail(line_error::tags_too_long);
   }
   const std::size_t body_from = out.size();
   if (l.from && !l.from->empty()) {
-    const std::string who = write_source(*l.from);
-    if (!clean(who) || who.find(' ') != std::string::npos) return std::unexpected(line_error::bad_character);
-    out += ":" + who + " ";
+    const std::size_t at = out.size() + 1;
+    out += ':';
+    write_source(*l.from, out);
+    const std::string_view who = std::string_view(out).substr(at);
+    if (!clean(who) || who.find(' ') != std::string_view::npos) return fail(line_error::bad_character);
+    out += ' ';
   }
-  if (!detail::command_ok(l.command)) return std::unexpected(line_error::bad_command);
+  if (!detail::command_ok(l.command)) return fail(line_error::bad_command);
   out += l.command;
   for (std::size_t i = 0; i < l.params.size(); ++i) {
     const std::string& p = l.params[i];
-    if (!clean(p)) return std::unexpected(line_error::bad_character);
+    if (!clean(p)) return fail(line_error::bad_character);
     const bool last = i + 1 == l.params.size();
     const bool needs_colon = p.empty() || p.front() == ':' || p.find(' ') != std::string::npos;
-    if (needs_colon && !last) return std::unexpected(line_error::bad_parameter);
+    if (needs_colon && !last) return fail(line_error::bad_parameter);
     out += ' ';
     if (needs_colon) out += ':';
     out += p;
   }
   out += "\r\n";
-  if (out.size() - body_from > max_body_bytes) return std::unexpected(line_error::body_too_long);
+  if (out.size() - body_from > max_body_bytes) return fail(line_error::body_too_long);
+  return {};
+}
+// The same, into a string of its own.
+constexpr std::expected<std::string, line_error> write(const line& l) {
+  std::string out;
+  if (auto done = write(l, out); !done) return std::unexpected(done.error());
   return out;
 }
 
 // A line made from its command and parameters, for writing.
 template <class... P>
-[[nodiscard]] constexpr line make(std::string command, P&&... params) {
+constexpr line make(std::string command, P&&... params) {
   line l;
   l.command = std::move(command);
   (l.params.emplace_back(std::forward<P>(params)), ...);

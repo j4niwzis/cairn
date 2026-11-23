@@ -101,7 +101,7 @@ constexpr std::optional<std::pair<std::string, std::string>> ctcp_of(std::string
 }  // namespace detail
 
 // MODE's changes, as ISUPPORT says which modes take an argument: "+ov-k a b c".
-[[nodiscard]] constexpr std::vector<msg::mode_change> parse_modes(const std::vector<std::string>& params, std::size_t from,
+constexpr std::vector<msg::mode_change> parse_modes(const std::vector<std::string>& params, std::size_t from,
                                                                   const isupport& server, bool channel) {
   std::vector<msg::mode_change> out;
   std::size_t next = from + 1;
@@ -117,7 +117,7 @@ constexpr std::optional<std::pair<std::string, std::string>> ctcp_of(std::string
   return out;
 }
 
-[[nodiscard]] constexpr message read(line l, const isupport& server = {}) {
+constexpr message read(line l, const isupport& server = {}) {
   const auto& c = l.command;
   const auto p = [&](std::size_t i) { return std::string(l.param(i)); };
   message_t what = msg::unknown{};
@@ -189,7 +189,7 @@ constexpr std::optional<std::pair<std::string, std::string>> ctcp_of(std::string
 namespace detail {
 template <class... F> struct overloaded : F... { using F::operator()...; };
 }
-[[nodiscard]] constexpr line to_line(const message_t& m) {
+constexpr line to_line(const message_t& m) {
   return std::visit(detail::overloaded{
       [](const msg::privmsg& x) { return make("PRIVMSG", x.target, x.text); },
       [](const msg::notice& x) { return make("NOTICE", x.target, x.text); },
