@@ -71,22 +71,14 @@ struct message {
 };
 
 namespace detail {
-constexpr std::vector<std::string> split_commas(std::string_view s) {
-  std::vector<std::string> out;
-  if (s.empty()) return out;
-  std::size_t from = 0;
-  for (;;) {
-    const auto end = s.find(',', from);
-    out.emplace_back(s.substr(from, end - from));
-    if (end == std::string_view::npos) break;
-    from = end + 1;
-  }
-  return out;
+// "#a,#b" and back, as views.
+constexpr auto commas(std::string_view s) {
+  return s | std::views::split(',') | std::views::filter([](auto part) { return !std::ranges::empty(part); }) |
+         std::views::transform([](auto part) { return std::string_view(part); });
 }
+constexpr std::vector<std::string> split_commas(std::string_view s) { return std::ranges::to<std::vector<std::string>>(commas(s)); }
 constexpr std::string join_commas(const std::vector<std::string>& v) {
-  std::string out;
-  for (std::size_t i = 0; i < v.size(); ++i) out += (i ? "," : "") + v[i];
-  return out;
+  return std::ranges::to<std::string>(v | std::views::join_with(','));
 }
 // \x01COMMAND text\x01 -- the closing \x01 may be missing.
 constexpr std::optional<std::pair<std::string, std::string>> ctcp_of(std::string_view text) {
@@ -94,8 +86,7 @@ constexpr std::optional<std::pair<std::string, std::string>> ctcp_of(std::string
   text.remove_prefix(1);
   if (!text.empty() && text.back() == '\x01') text.remove_suffix(1);
   const auto space = text.find(' ');
-  std::string command(text.substr(0, space));
-  for (char& c : command) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+  auto command = std::ranges::to<std::string>(text.substr(0, space) | std::views::transform(upper));
   return std::pair{command, space == std::string_view::npos ? std::string() : std::string(text.substr(space + 1))};
 }
 }  // namespace detail

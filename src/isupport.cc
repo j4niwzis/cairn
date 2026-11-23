@@ -94,25 +94,30 @@ struct isupport {
     apply(key, value);
   }
 
-  // \xHH, as ISUPPORT escapes a value.
-  static constexpr std::string unescape(std::string_view in) {
-    std::string out;
-    const auto hex = [](char c) -> int {
-      if (c >= '0' && c <= '9') return c - '0';
-      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-      return -1;
-    };
-    for (std::size_t i = 0; i < in.size(); ++i) {
-      if (in[i] == '\\' && i + 3 < in.size() && in[i + 1] == 'x' && hex(in[i + 2]) >= 0 && hex(in[i + 3]) >= 0) {
-        out += static_cast<char>(hex(in[i + 2]) * 16 + hex(in[i + 3]));
-        i += 3;
-      } else {
-        out += in[i];
-      }
-    }
-    return out;
+  // \xHH, as ISUPPORT escapes a value: unescaped as it is walked.
+  static constexpr int hex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
   }
+  // The value's characters, each \xHH as the one it stands for.
+  static constexpr auto unescaped_value(std::string_view in) {
+    // Where each character begins: an escape takes four.
+    const auto escape_at = [in](std::size_t i) {
+      return in[i] == '\\' && i + 3 < in.size() && in[i + 1] == 'x' && hex(in[i + 2]) >= 0 && hex(in[i + 3]) >= 0;
+    };
+    return std::views::iota(std::size_t{0}, in.size()) | std::views::filter([in, escape_at](std::size_t i) {
+             // Not inside an escape begun up to three before it.
+             for (std::size_t back = 1; back <= 3 && back <= i; ++back)
+               if (escape_at(i - back)) return false;
+             return true;
+           }) |
+           std::views::transform([in, escape_at](std::size_t i) {
+             return escape_at(i) ? static_cast<char>(hex(in[i + 2]) * 16 + hex(in[i + 3])) : in[i];
+           });
+  }
+  static constexpr std::string unescape(std::string_view in) { return std::ranges::to<std::string>(unescaped_value(in)); }
 
  private:
   static constexpr std::optional<std::size_t> number(std::string_view v) {

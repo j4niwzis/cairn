@@ -115,6 +115,8 @@ static_assert(told(libera).whox && told(libera).utf8only);
 static_assert(*told(libera).bot == 'B');
 static_assert(told(libera).is_channel("#mux") && !told(libera).is_channel("&local"));
 static_assert(told(":srv 005 me NETWORK=Some\\x20Net :are supported").network == "Some Net");
+static_assert(isupport::unescape("a\\x5cx41b") == "a\\x41b");  // an escaped backslash, then plain text
+static_assert(isupport::unescape("tail\\x4") == "tail\\x4");    // cut short: as it is
 static_assert([] {
   isupport i = told(libera);
   i.take(parsed(":srv 005 me -NETWORK -WHOX :are supported"));
