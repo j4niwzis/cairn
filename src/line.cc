@@ -238,18 +238,23 @@ class params_view : public std::ranges::view_interface<params_view> {
         done_ = true;
         return;
       }
-      if (rest_.front() == ':') {  // the last: all that is left
-        current_ = rest_.substr(1);
+      // The last: all that is left -- after a ':', or, as RFC 1459 has it,
+      // the fifteenth, which takes the rest without one.
+      if (rest_.front() == ':' || index_ == 14) {
+        current_ = rest_.front() == ':' ? rest_.substr(1) : rest_;
+        ++index_;
         rest_ = rest_.substr(rest_.size());
         trailing_taken_ = true;
         return;
       }
       const auto space = rest_.find(' ');
+      ++index_;
       current_ = rest_.substr(0, space);
       rest_ = rest_.substr(space == std::string_view::npos ? rest_.size() : space);
     }
     std::string_view rest_;
     std::string_view current_;
+    std::size_t index_ = 0;
     bool done_ = false, trailing_taken_ = false;
   };
   constexpr params_view() = default;
@@ -430,8 +435,17 @@ template <class Out> constexpr bool write_tag_value(const tag_view& t, Out& out,
   fits &= put(out, t.text);
   return true;
 }
+// Escaped in runs: what needs none written at once, then the escape.
 template <class Out> constexpr bool write_tag_value(const tag& t, Out& out, bool& fits) {
-  fits &= put_range(out, escaped(t.text));
+  std::string_view rest = t.text;
+  while (!rest.empty()) {
+    const auto at = rest.find_first_of(std::string_view("; \\\r\n", 5));
+    fits &= put(out, rest.substr(0, at));
+    if (at == std::string_view::npos) break;
+    const char c = rest[at];
+    fits &= put(out, std::string_view(c == ';' ? "\\:" : c == ' ' ? "\\s" : c == '\\' ? "\\\\" : c == '\r' ? "\\r" : "\\n"));
+    rest.remove_prefix(at + 1);
+  }
   return true;
 }
 // The parameters: a view's as the wire had them; a line's one by one, the

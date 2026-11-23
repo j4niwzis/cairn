@@ -161,6 +161,25 @@ static_assert([] {
   return i.network.empty() && !i.whox && !i.has("WHOX");
 }());
 static_assert(told(":srv 005 me PREFIX= :are supported").prefixes.empty());
+// A NUL or a CR inside a line: not a line (it could not be written back).
+static_assert(!try_parse(std::string_view("PRIVMSG #a :x\0y", 15)));
+static_assert(!try_parse("PRIVMSG #a :x\ry"));
+static_assert(!try_parse("PRIVMSG #a :x\ny\r\n"));  // found by the fuzzer: an LF inside
+static_assert(!try_parse("@=x PING a") && !try_parse("@a;=x PING a") && try_parse("@a;;b PING a"));  // and a tag without a key
+// The fifteenth parameter takes the rest, as RFC 1459 has it.
+static_assert(try_parse("CMD 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17")->param(14) == "15 16 17");
+static_assert(try_parse("CMD 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15")->param(14) == "15");
+// The by-hand slicing reads as the described grammar does.
+static_assert([] {
+  for (std::string_view one : {"@a=b;c :n!u@h PRIVMSG #x :hi there  ", "  PING   x  ", "@ PING", ": PING", "PRIV1 x", "1234 x", "", "@a=b",
+                               ":src", "001 me :hi", "NOTICE * :*** a   "}) {
+    const auto a = try_parse<grammars::by_hand>(one), b = try_parse<grammars::described>(one);
+    if (a.has_value() != b.has_value()) return false;
+    if (a && (a->command != b->command || a->params_text != b->params_text || a->tags_text != b->tags_text)) return false;
+    if (!a && a.error().index() != b.error().index()) return false;
+  }
+  return true;
+}());
 }  // namespace
 
 TEST(Line, ReadWrittenAndThrownWhenRun) {

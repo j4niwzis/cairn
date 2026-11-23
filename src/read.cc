@@ -22,6 +22,15 @@ constexpr line_view assemble(const grammar::raw& got) {
   out.params_text = got.params;
   return out;
 }
+// Every tag has a key: "@=x" or "@a;=x" is no line (it could not be
+// written back). Empty parts (";;") are nothing, and allowed.
+constexpr bool keys_ok(std::string_view tags) {
+  for (auto part : tags | std::views::split(';')) {
+    const std::string_view one(part.begin(), part.end());
+    if (!one.empty() && one.front() == '=') return false;
+  }
+  return true;
+}
 constexpr std::string_view without_line_end(std::string_view in) {
   while (!in.empty() && (in.back() == '\n' || in.back() == '\r')) in.remove_suffix(1);
   return in;
@@ -30,11 +39,75 @@ constexpr std::string_view without_line_end(std::string_view in) {
 
 namespace grammars {
 // The description walked as it is: constexpr, the reference.
+struct described {
+  static constexpr std::expected<line_view, line_error> try_parse(std::string_view in) {
+    in = detail::without_line_end(in);
+    if (in.find_first_of(std::string_view("\0\r\n", 3)) != std::string_view::npos) return std::unexpected(errors::bad_character{});
+    grammar::walk w{in};
+    if (!grammar::walks<grammar::line>(w) || w.error) return std::unexpected(w.error.value_or(errors::empty{}));
+    if (!detail::keys_ok(w.got.tags)) return std::unexpected(errors::bad_tags{});
+    return detail::assemble(w.got);
+  }
+};
+
+// The same grammar sliced by hand: a find(' ') a part (memchr), as the
+// description reads it, and the same errors where it fails.
 struct by_hand {
   static constexpr std::expected<line_view, line_error> try_parse(std::string_view in) {
-    grammar::walk w{detail::without_line_end(in)};
-    if (!grammar::walks<grammar::line>(w) || w.error) return std::unexpected(w.error.value_or(errors::empty{}));
-    return detail::assemble(w.got);
+    in = detail::without_line_end(in);
+    // A NUL, a CR or an LF inside the line is no part of one (and could not be
+    // written back).
+    if (in.find_first_of(std::string_view("\0\r\n", 3)) != std::string_view::npos) return std::unexpected(errors::bad_character{});
+    const auto skip_spaces = [&] { in.remove_prefix(std::min(in.find_first_not_of(' '), in.size())); };
+    const auto word = [&] {
+      const std::string_view got = in.substr(0, in.find(' '));
+      in.remove_prefix(got.size());
+      return got;
+    };
+    // Where a part is missing: at the end of the line, empty; else the error.
+    const auto fail = [&]<class E>(E) -> std::unexpected<line_error> { return std::unexpected(grammar::error_at<E>(in)); };
+    grammar::raw got;
+    skip_spaces();
+    if (in.starts_with('@')) {
+      in.remove_prefix(1);
+      got.tagged = true;
+      got.tags = word();
+      if (got.tags.empty()) return fail(errors::bad_tags{});
+      skip_spaces();
+    }
+    if (in.starts_with(':')) {
+      in.remove_prefix(1);
+      got.sourced = true;
+      got.source = word();
+      if (got.source.empty()) return fail(errors::bad_source{});
+      skip_spaces();
+    }
+    const std::string_view at_command = in;
+    got.command = word();
+    const auto alpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+    const auto digit = [](char c) { return c >= '0' && c <= '9'; };
+    const bool named = !got.command.empty() && std::ranges::all_of(got.command, alpha);
+    const bool numeric = got.command.size() == 3 && std::ranges::all_of(got.command, digit);
+    if (!named && !numeric) {
+      in = at_command;
+      return fail(errors::bad_command{});
+    }
+    // The parameters: up to the end of the last (the trailing one to the end
+    // of the line), the spaces after it left out.
+    std::size_t end = 0;
+    for (std::size_t at = 0;;) {
+      at = in.find_first_not_of(' ', at);
+      if (at == std::string_view::npos) break;
+      if (in[at] == ':') {
+        end = in.size();
+        break;
+      }
+      at = std::min(in.find(' ', at), in.size());
+      end = at;
+    }
+    got.params = in.substr(0, end);
+    if (!detail::keys_ok(got.tags)) return std::unexpected(errors::bad_tags{});
+    return detail::assemble(got);
   }
 };
 
