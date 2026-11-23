@@ -12,6 +12,7 @@ option(CAIRN_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
 # Lines read by scan's automata too (cairn.scan): fast to run, slower to
 # build. Off, std::regex and the walk read them, with nothing but std.
 option(CAIRN_SCAN "Read lines with scan as well (cairn.scan)" ON)
+option(CAIRN_BENCHMARKS "Build the benchmarks" OFF)
 
 if(NOT COMMAND cme_find_package)
   set(CME_WITHOUT_PROVIDER ON)
@@ -95,4 +96,10 @@ if(CAIRN_TESTS)
     target_link_libraries(cairn-${name}-test PRIVATE cairn ${cairn_gtest})
     add_test(NAME ${name} COMMAND cairn-${name}-test)
   endforeach()
+endif()
+
+# How fast each grammar reads lines (benchmarks/parse_benchmark.cc).
+if(CAIRN_BENCHMARKS)
+  add_executable(cairn-parse-benchmark benchmarks/parse_benchmark.cc)
+  target_link_libraries(cairn-parse-benchmark PRIVATE cairn)
 endif()
