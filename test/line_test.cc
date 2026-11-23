@@ -82,8 +82,8 @@ static_assert([] {
   constexpr std::string_view text = "@a=b\\sc;k :n!u@h privmsg #c :hi there";
   const line_view v = *try_parse(text);
   return v.command.data() == text.data() + 17 && v.is("PRIVMSG") && v.from->nick == "n" && v.param(1) == "hi there" &&
-         v.tags[0].text == "b\\sc" && std::ranges::equal(v.tags[0].value(), std::string_view("b c")) &&
-         *v.tag_value("a") == "b c" && *try_write(v) == "@a=b\\sc;k :n!u@h privmsg #c :hi there\r\n" &&
+         v.tag("a")->text == "b\\sc" && std::ranges::equal(v.tag("a")->value(), std::string_view("b c")) &&
+         std::ranges::equal(*v.tag_value("a"), std::string_view("b c")) && *try_write(v) == "@a=b\\sc;k :n!u@h privmsg #c :hi there\r\n" &&
          to_owned(v).command == "PRIVMSG";
 }());
 
@@ -104,7 +104,7 @@ static_assert([] {
   const std::string wire = "PING :a\r\n\r\nPONG :b\r\nNICK";
   std::vector<std::string> commands;
   for (const auto& one : lines(wire | std::views::filter([](char) { return true; })))
-    if (one) commands.push_back(one->command);
+    if (one) commands.emplace_back(one->command);
   return commands == std::vector<std::string>{"PING", "PONG", "NICK"};
 }());
 
@@ -164,5 +164,5 @@ static_assert(told(":srv 005 me PREFIX= :are supported").prefixes.empty());
 TEST(Line, ReadWrittenAndThrownWhenRun) {
   // The same, when run: one of the constant ones, so the program does work.
   const auto l = cairn::try_parse("@a=b\\sc :n!u@h PRIVMSG #c :hi there\r\n");
-  if (!l || *l->tag_value("a") != "b c" || l->params.back() != "hi there") FAIL();
+  if (!l || !std::ranges::equal(*l->tag_value("a"), std::string_view("b c")) || l->params.back() != "hi there") FAIL();
 }

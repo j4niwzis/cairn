@@ -6,6 +6,7 @@ export module cairn.line;
 
 import std;
 import splice;
+import cairn.fixed;
 
 export namespace cairn {
 
@@ -15,8 +16,8 @@ namespace errors {
 struct empty { static constexpr std::string_view what = "empty line"; };  // nothing but spaces, or no command
 struct bad_tags { static constexpr std::string_view what = "tags marker with no tags"; };
 struct bad_source { static constexpr std::string_view what = "source marker with no source"; };
-struct bad_command {  // neither letters nor three digits
-  std::string command;
+struct bad_command {  // neither letters nor three digits: the word, as far as 32 bytes of it
+  fixed_text<32> command;
   static constexpr std::string_view what = "malformed command";
   friend constexpr bool operator==(const bad_command&, const bad_command&) = default;
 };
@@ -36,6 +37,14 @@ struct bad_parameter {  // a middle parameter empty, with a space, or ':' first
   friend constexpr bool operator==(const bad_parameter&, const bad_parameter&) = default;
 };
 struct bad_character { static constexpr std::string_view what = "CR, LF or NUL in a line"; };
+struct too_many_parameters {  // more than fifteen
+  static constexpr std::string_view what = "more than 15 parameters";
+  friend constexpr bool operator==(too_many_parameters, too_many_parameters) { return true; }
+};
+struct too_long_to_read {  // a line read off a range longer than the room for it
+  static constexpr std::string_view what = "line longer than the room for it";
+  friend constexpr bool operator==(too_long_to_read, too_long_to_read) { return true; }
+};
 constexpr bool operator==(empty, empty) { return true; }
 constexpr bool operator==(bad_tags, bad_tags) { return true; }
 constexpr bool operator==(bad_source, bad_source) { return true; }
@@ -43,18 +52,23 @@ constexpr bool operator==(bad_character, bad_character) { return true; }
 }  // namespace errors
 using line_error = spl::variant<errors::empty, errors::bad_tags, errors::bad_source, errors::bad_command,
                                 errors::tags_too_long, errors::body_too_long, errors::bad_parameter,
-                                errors::bad_character>;
+                                errors::bad_character, errors::too_many_parameters, errors::too_long_to_read>;
 constexpr std::string_view describe(const line_error& e) {
   return spl::visit([](const auto& one) { return std::remove_cvref_t<decltype(one)>::what; }, e);
 }
 
 inline constexpr std::size_t max_tags_bytes = 8191;
 inline constexpr std::size_t max_body_bytes = 512;
+inline constexpr std::size_t max_params = 15;
+// The most a line can be on the wire: its tags, the rest, CR LF.
+inline constexpr std::size_t max_line_bytes = max_tags_bytes + max_body_bytes;
 
 // Reading or writing that came to an error, thrown: the error, as it was.
-struct line_failure : std::runtime_error {
+// Its text the error's own, a literal: nothing made to throw it.
+struct line_failure : std::exception {
   line_error error;
-  explicit line_failure(line_error e) : std::runtime_error(std::string(describe(e))), error(std::move(e)) {}
+  explicit line_failure(line_error e) : error(std::move(e)) {}
+  const char* what() const noexcept override { return describe(error).data(); }
 };
 
 // A tag's value as the wire carries it, and back (IRCv3 message-tags), as
@@ -164,48 +178,87 @@ template <class S> struct basic_source {
   friend constexpr bool operator==(const basic_source&, const basic_source&) = default;
 };
 
-// A line: owning (S = std::string, `line`) or a view into what was read
-// (S = std::string_view, `line_view`), valid while that is.
-template <class S> struct basic_line {
-  std::vector<basic_tag<S>> tags;
-  std::optional<basic_source<S>> from;
-  S command;  // as it came; is() compares without case
-  std::vector<S> params;
+using tag = basic_tag<std::string>;
+using source = basic_source<std::string>;
+using tag_view = basic_tag<std::string_view>;
+using source_view = basic_source<std::string_view>;
 
-  constexpr const basic_tag<S>* tag(std::string_view key) const {
+namespace detail {
+constexpr bool command_is(std::string_view command, std::string_view name) {
+  return command.size() == name.size() &&
+         std::ranges::equal(command, name, [](char a, char b) { return detail::upper(a) == detail::upper(b); });
+}
+constexpr int number_of(std::string_view command) {
+  return command.size() == 3 && std::ranges::all_of(command, [](char c) { return c >= '0' && c <= '9'; })
+             ? (command[0] - '0') * 100 + (command[1] - '0') * 10 + (command[2] - '0')
+             : -1;
+}
+// The tags of a line as the wire has them, a tag at a time.
+constexpr auto tags_in(std::string_view text) {
+  return text | std::views::split(';') | std::views::filter([](auto part) { return !std::ranges::empty(part); }) |
+         std::views::transform([](auto part) {
+           const std::string_view one(part);
+           const auto eq = one.find('=');
+           return tag_view{one.substr(0, eq), eq == std::string_view::npos ? std::string_view() : one.substr(eq + 1)};
+         });
+}
+}  // namespace detail
+
+// A line as views into what was read, valid while that is -- nothing of its
+// own, and nothing asked of memory to make it: its tags read off their text
+// as they are walked, its parameters held in place (fifteen at most).
+struct line_view {
+  std::string_view tags_text;  // as the wire has it, escaped; empty: none
+  std::optional<source_view> from;
+  std::string_view command;  // as it came; is() compares without case
+  fixed_vector<std::string_view, max_params> params;
+
+  constexpr auto tags() const { return detail::tags_in(tags_text); }
+  // A tag by its key -- the last of it, where it was given twice.
+  constexpr std::optional<tag_view> tag(std::string_view key) const {
+    std::optional<tag_view> found;
+    for (tag_view one : tags())
+      if (one.key == key) found = one;
+    return found;
+  }
+  constexpr bool has_tag(std::string_view key) const { return tag(key).has_value(); }
+  // Its value, unescaped as it is walked.
+  constexpr std::optional<unescaped_view> tag_value(std::string_view key) const {
+    if (auto one = tag(key)) return one->value();
+    return std::nullopt;
+  }
+  constexpr bool is(std::string_view name) const { return detail::command_is(command, name); }
+  constexpr bool numeric() const { return detail::number_of(command) >= 0; }
+  constexpr int number() const { return std::max(0, detail::number_of(command)); }
+  constexpr std::string_view param(std::size_t i) const { return i < params.size() ? params[i] : std::string_view(); }
+  friend constexpr bool operator==(const line_view&, const line_view&) = default;
+};
+
+// A line of its own: its tags unescaped, its command upper-cased.
+struct line {
+  std::vector<cairn::tag> tags;
+  std::optional<cairn::source> from;
+  std::string command;
+  std::vector<std::string> params;
+
+  constexpr const cairn::tag* tag(std::string_view key) const {
     for (const auto& one : tags)
       if (one.key == key) return &one;
     return nullptr;
   }
   constexpr bool has_tag(std::string_view key) const { return tag(key) != nullptr; }
-  // A tag's value, unescaped, as a string of its own -- or none.
   constexpr std::optional<std::string> tag_value(std::string_view key) const {
-    const auto* one = tag(key);
-    if (!one) return std::nullopt;
-    return std::ranges::to<std::string>(one->value());
+    if (const auto* one = tag(key)) return one->text;
+    return std::nullopt;
   }
-  constexpr bool is(std::string_view name) const {
-    return command.size() == name.size() &&
-           std::ranges::equal(command, name, [](char a, char b) { return detail::upper(a) == detail::upper(b); });
-  }
-  constexpr bool numeric() const {
-    return command.size() == 3 && std::ranges::all_of(command, [](char c) { return c >= '0' && c <= '9'; });
-  }
-  constexpr int number() const {
-    return numeric() ? (command[0] - '0') * 100 + (command[1] - '0') * 10 + (command[2] - '0') : 0;
-  }
+  constexpr bool is(std::string_view name) const { return detail::command_is(command, name); }
+  constexpr bool numeric() const { return detail::number_of(command) >= 0; }
+  constexpr int number() const { return std::max(0, detail::number_of(command)); }
   constexpr std::string_view param(std::size_t i) const {
     return i < params.size() ? std::string_view(params[i]) : std::string_view();
   }
-  friend constexpr bool operator==(const basic_line&, const basic_line&) = default;
+  friend constexpr bool operator==(const line&, const line&) = default;
 };
-
-using tag = basic_tag<std::string>;
-using source = basic_source<std::string>;
-using line = basic_line<std::string>;
-using tag_view = basic_tag<std::string_view>;
-using source_view = basic_source<std::string_view>;
-using line_view = basic_line<std::string_view>;
 
 namespace detail {
 constexpr bool is_space(char c) { return c == ' '; }
@@ -241,14 +294,19 @@ constexpr source_view parse_source(std::string_view in) {
 // A line, as views into what is given -- without its CR LF (a trailing CR
 // or LF is taken off). Tags and source optional; any number of spaces
 // between parts; the last parameter after ':' keeps its spaces.
-// A line of its own, from a view: values unescaped, command upper-cased.
+// A line of its own, from a view: values unescaped, a key given twice
+// kept once, the last time; the command upper-cased.
 constexpr line to_owned(const line_view& v) {
   line out;
-  out.tags.reserve(v.tags.size());
-  for (const tag_view& t : v.tags) out.tags.push_back({std::string(t.key), std::ranges::to<std::string>(t.value())});
+  for (const tag_view t : v.tags()) {
+    cairn::tag one{std::string(t.key), std::ranges::to<std::string>(t.value())};
+    if (auto same = std::ranges::find(out.tags, one.key, &cairn::tag::key); same != out.tags.end())
+      *same = std::move(one);
+    else
+      out.tags.push_back(std::move(one));
+  }
   if (v.from) out.from = source{std::string(v.from->nick), std::string(v.from->user), std::string(v.from->host)};
   out.command = std::ranges::to<std::string>(v.command | std::views::transform(detail::upper));
-  out.params.reserve(v.params.size());
   for (std::string_view p : v.params) out.params.emplace_back(p);
   return out;
 }
@@ -259,75 +317,110 @@ constexpr const line& to_owned(const line& l) { return l; }
 // written, the last parameter after ':' where it has to be (empty, a space
 // in it, or ':' first). A line_view's tag values go as they came, escaped;
 // a line's are escaped as they are written.
-template <class S>
-constexpr std::expected<void, line_error> try_write(const basic_line<S>& l, std::string& out) {
+namespace detail {
+// What a line is written into: a std::string (the owning way) or a
+// fixed_text (room said in advance, nothing asked of memory) -- anything
+// that appends, says its size and its data, and can be cut back.
+template <class T>
+concept text_sink = requires(T& out, std::string_view s, char c, std::size_t n) {
+  out.size();
+  out.data();
+  out.append(s);
+  out.push_back(c);
+  out.resize(n);
+};
+template <class Out> constexpr bool put(Out& out, std::string_view s) {
+  if constexpr (std::same_as<Out, std::string>) return out.append(s), true;
+  else return out.append(s);
+}
+template <class Out> constexpr bool put(Out& out, char c) {
+  if constexpr (std::same_as<Out, std::string>) return out.push_back(c), true;
+  else return out.push_back(c);
+}
+template <class Out, class R> constexpr bool put_range(Out& out, R&& r) {
+  for (char c : r)
+    if (!put(out, c)) return false;
+  return true;
+}
+template <class Out> constexpr void cut(Out& out, std::size_t n) { out.resize(n); }
+}  // namespace detail
+
+template <class L, class Out>
+  requires(std::same_as<L, line> || std::same_as<L, line_view>) && detail::text_sink<Out>
+constexpr std::expected<void, line_error> try_write(const L& l, Out& out) {
   const std::size_t began = out.size();
+  bool fits = true;  // room in what it is written into
   const auto fail = [&](line_error e) -> std::unexpected<line_error> {
-    out.resize(began);
+    detail::cut(out, began);
     return std::unexpected(std::move(e));
   };
   const auto clean = [](std::string_view s) {
     return std::ranges::none_of(s, [](char c) { return c == '\r' || c == '\n' || c == '\0'; });
   };
-  if (!l.tags.empty()) {
-    out += '@';
+  constexpr bool raw = std::same_as<L, line_view>;
+  auto tag_list = [&] {
+    if constexpr (raw) return l.tags(); else return std::views::all(l.tags);
+  }();
+  if (std::ranges::begin(tag_list) != std::ranges::end(tag_list)) {
+    fits &= detail::put(out, '@');
     bool first = true;
-    for (const auto& t : l.tags) {
+    for (const auto& t : tag_list) {
       const std::string_view key = t.key;
       if (key.empty() || !clean(key) || key.find_first_of(" ;=") != std::string_view::npos) return fail(errors::bad_character{});
-      if (!first) out += ';';
+      if (!first) fits &= detail::put(out, ';');
       first = false;
-      out += key;
+      fits &= detail::put(out, key);
       if (!t.text.empty()) {
-        out += '=';
-        if constexpr (std::same_as<S, std::string_view>) {
+        fits &= detail::put(out, '=');
+        if constexpr (raw) {
           if (!clean(t.text) || t.text.find_first_of(" ;") != std::string_view::npos) return fail(errors::bad_character{});
-          out += t.text;
+          fits &= detail::put(out, t.text);
         } else {
-          out.append_range(escaped(t.text));
+          fits &= detail::put_range(out, escaped(t.text));
         }
       }
     }
-    out += ' ';
+    fits &= detail::put(out, ' ');
     if (out.size() - began > max_tags_bytes) return fail(errors::tags_too_long{out.size() - began});
   }
   const std::size_t body_from = out.size();
   if (l.from && !l.from->empty()) {
     const std::size_t at = out.size() + 1;
-    out += ':';
-    out += l.from->nick;
-    if (!l.from->user.empty()) (out += '!') += l.from->user;
-    if (!l.from->host.empty()) (out += '@') += l.from->host;
-    const std::string_view who = std::string_view(out).substr(at);
+    fits &= detail::put(out, ':');
+    fits &= detail::put(out, l.from->nick);
+    if (!l.from->user.empty()) { fits &= detail::put(out, '!'); fits &= detail::put(out, l.from->user); }
+    if (!l.from->host.empty()) { fits &= detail::put(out, '@'); fits &= detail::put(out, l.from->host); }
+    const std::string_view who = std::string_view(out.data(), out.size()).substr(at);
     if (!clean(who) || who.find(' ') != std::string_view::npos) return fail(errors::bad_character{});
-    out += ' ';
+    fits &= detail::put(out, ' ');
   }
-  if (!detail::command_ok(l.command)) return fail(errors::bad_command{std::string(l.command)});
-  out += l.command;
+  if (!detail::command_ok(l.command)) return fail(errors::bad_command{fixed_text<32>(l.command)});
+  fits &= detail::put(out, l.command);
   for (std::size_t i = 0; i < l.params.size(); ++i) {
     const std::string_view p = l.params[i];
     if (!clean(p)) return fail(errors::bad_character{});
     const bool last = i + 1 == l.params.size();
     const bool needs_colon = p.empty() || p.front() == ':' || p.find(' ') != std::string_view::npos;
     if (needs_colon && !last) return fail(errors::bad_parameter{i});
-    out += ' ';
-    if (needs_colon) out += ':';
-    out += p;
+    fits &= detail::put(out, ' ');
+    if (needs_colon) fits &= detail::put(out, ':');
+    fits &= detail::put(out, p);
   }
-  out += "\r\n";
+  fits &= detail::put(out, "\r\n");
+  if (!fits) return fail(errors::too_long_to_read{});
   if (out.size() - body_from > max_body_bytes) return fail(errors::body_too_long{out.size() - body_from});
   return {};
 }
-template <class S> constexpr void write(const basic_line<S>& l, std::string& out) {
+template <class L, detail::text_sink Out> constexpr void write(const L& l, Out& out) {
   if (auto done = try_write(l, out); !done) throw line_failure(std::move(done.error()));
 }
 // Into a string of its own.
-template <class S> constexpr std::expected<std::string, line_error> try_write(const basic_line<S>& l) {
+template <class L> constexpr std::expected<std::string, line_error> try_write(const L& l) {
   std::string out;
   if (auto done = try_write(l, out); !done) return std::unexpected(std::move(done.error()));
   return out;
 }
-template <class S> constexpr std::string write(const basic_line<S>& l) {
+template <class L> constexpr std::string write(const L& l) {
   std::string out;
   write(l, out);
   return out;

@@ -57,7 +57,7 @@ TEST(Grammars, StdRegexReadsAsByHand) {
   const std::string wire = "PING :a\r\n:n!u@h PRIVMSG #c :x y\r\n";
   std::vector<std::string> commands;
   for (const auto& one : cairn::lines<cairn::grammars::std_regex>(wire))
-    if (one) commands.push_back(one->command);
+    if (one) commands.emplace_back(one->command);
   if (commands != std::vector<std::string>{"PING", "PRIVMSG"}) ADD_FAILURE();
   try {
     (void)cairn::parse<cairn::grammars::std_regex>("12 foo");

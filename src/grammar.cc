@@ -8,6 +8,7 @@ export module cairn.grammar;
 
 import std;
 import splice;
+import cairn.fixed;
 import cairn.line;
 
 export namespace cairn::grammar {
@@ -47,7 +48,7 @@ struct raw {
   std::string_view tags;
   std::string_view source;
   std::string_view command;
-  std::vector<std::string_view> params;
+  fixed_vector<std::string_view, max_params> params;
   bool tagged = false, sourced = false;
 };
 template <auto Flag, class N> struct flag {};  // N read: Flag set
@@ -72,8 +73,8 @@ struct walk {
 
 template <class E> constexpr line_error error_at(std::string_view rest_of_line) {
   if (rest_of_line.empty()) return errors::empty{};
-  if constexpr (std::is_constructible_v<E, std::string>)
-    return E{std::string(rest_of_line.substr(0, rest_of_line.find(' ')))};
+  if constexpr (std::is_constructible_v<E, fixed_text<32>>)
+    return E{fixed_text<32>(rest_of_line.substr(0, rest_of_line.find(' ')))};
   else
     return E{};
 }
@@ -147,10 +148,12 @@ template <auto Field, class N> struct walker<capture<Field, N>> {
     const std::size_t from = w.at;
     if (!walks<N>(w)) return false;
     const std::string_view text = w.in.substr(from, w.at - from);
-    if constexpr (std::same_as<std::remove_cvref_t<decltype(w.got.*Field)>, std::string_view>)
+    if constexpr (std::same_as<std::remove_cvref_t<decltype(w.got.*Field)>, std::string_view>) {
       w.got.*Field = text;
-    else
-      (w.got.*Field).push_back(text);
+    } else if (!(w.got.*Field).push_back(text)) {
+      w.error = errors::too_many_parameters{};
+      return false;
+    }
     return true;
   }
 };
