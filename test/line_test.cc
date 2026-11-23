@@ -61,8 +61,9 @@ static_assert(written(line{{{"a", "b c;d\\"}, {"k", ""}}, source{"n", "u", "h"},
               "@a=b\\sc\\:d\\\\;k :n!u@h PRIVMSG #c x\r\n");
 static_assert(spl::get<errors::bad_parameter>(try_write(make("PRIVMSG", "a b", "x")).error()).index == 0);
 static_assert(spl::holds_alternative<errors::bad_character>(try_write(make("PRIVMSG", "#c", "a\r\nQUIT")).error()));
-static_assert(spl::get<errors::body_too_long>(try_write(make("PRIVMSG", "#c", std::string(500, 'x'))).error()).bytes == 513);  // PRIVMSG #c, a space, 500 bytes, CR LF
-static_assert(try_write(make("PRIVMSG", "#c", std::string(490, 'x'))).has_value());
+static_assert(spl::get<errors::body_too_long>(try_write<limits::irc>(make("PRIVMSG", "#c", std::string(500, 'x'))).error()).bytes == 513);  // PRIVMSG #c, a space, 500 bytes, CR LF
+static_assert(try_write<limits::irc>(make("PRIVMSG", "#c", std::string(490, 'x'))).has_value());
+static_assert(try_write(make("PRIVMSG", "#c", std::string(5000, 'x'))).has_value());  // no limit unless asked
 // Into the caller's buffer: appended; refused, the buffer as it was.
 static_assert([] {
   std::string out = "PING x\r\n";
@@ -103,7 +104,8 @@ static_assert([] {
 static_assert([] {
   const std::string wire = "PING :a\r\n\r\nPONG :b\r\nNICK";
   std::vector<std::string> commands;
-  for (const auto& one : lines(wire | std::views::filter([](char) { return true; })))
+  std::array<char, 64> room{};
+  for (const auto& one : lines(wire | std::views::filter([](char) { return true; }), room))
     if (one) commands.emplace_back(one->command);
   return commands == std::vector<std::string>{"PING", "PONG", "NICK"};
 }());
@@ -164,5 +166,5 @@ static_assert(told(":srv 005 me PREFIX= :are supported").prefixes.empty());
 TEST(Line, ReadWrittenAndThrownWhenRun) {
   // The same, when run: one of the constant ones, so the program does work.
   const auto l = cairn::try_parse("@a=b\\sc :n!u@h PRIVMSG #c :hi there\r\n");
-  if (!l || !std::ranges::equal(*l->tag_value("a"), std::string_view("b c")) || l->params.back() != "hi there") FAIL();
+  if (!l || !std::ranges::equal(*l->tag_value("a"), std::string_view("b c")) || l->param(1) != "hi there") FAIL();
 }

@@ -8,7 +8,6 @@ export module cairn.grammar;
 
 import std;
 import splice;
-import cairn.fixed;
 import cairn.line;
 
 export namespace cairn::grammar {
@@ -48,7 +47,7 @@ struct raw {
   std::string_view tags;
   std::string_view source;
   std::string_view command;
-  fixed_vector<std::string_view, max_params> params;
+  std::string_view params;  // the text of them all, read lazily after
   bool tagged = false, sourced = false;
 };
 template <auto Flag, class N> struct flag {};  // N read: Flag set
@@ -59,7 +58,7 @@ using line = seq<
     opt<seq<lit<'@'>, flag<&raw::tagged, expect<errors::bad_tags, capture<&raw::tags, word>>>, opt<spaces>>>,
     opt<seq<lit<':'>, flag<&raw::sourced, expect<errors::bad_source, capture<&raw::source, word>>>, opt<spaces>>>,
     expect<errors::bad_command, seq<capture<&raw::command, alt<many1<alpha>, repeat<digit, 3>>>, word_end>>,
-    many<seq<spaces, alt<seq<lit<':'>, capture<&raw::params, rest>>, capture<&raw::params, word>>>>,
+    capture<&raw::params, many<seq<spaces, alt<seq<lit<':'>, rest>, word>>>>,
     opt<spaces>>;
 
 // ---- walked: the grammar read as it is -------------------------------------
@@ -73,8 +72,8 @@ struct walk {
 
 template <class E> constexpr line_error error_at(std::string_view rest_of_line) {
   if (rest_of_line.empty()) return errors::empty{};
-  if constexpr (std::is_constructible_v<E, fixed_text<32>>)
-    return E{fixed_text<32>(rest_of_line.substr(0, rest_of_line.find(' ')))};
+  if constexpr (std::is_constructible_v<E, std::string_view>)
+    return E{rest_of_line.substr(0, rest_of_line.find(' '))};
   else
     return E{};
 }
@@ -148,12 +147,7 @@ template <auto Field, class N> struct walker<capture<Field, N>> {
     const std::size_t from = w.at;
     if (!walks<N>(w)) return false;
     const std::string_view text = w.in.substr(from, w.at - from);
-    if constexpr (std::same_as<std::remove_cvref_t<decltype(w.got.*Field)>, std::string_view>) {
-      w.got.*Field = text;
-    } else if (!(w.got.*Field).push_back(text)) {
-      w.error = errors::too_many_parameters{};
-      return false;
-    }
+    w.got.*Field = text;
     return true;
   }
 };

@@ -35,10 +35,7 @@ struct scan {
        const auto& group = m.template get<I + 1>();
        if (!group) return;
        const std::string_view text = group.to_view();
-       if constexpr (std::same_as<std::remove_cvref_t<decltype(got.*field)>, std::string_view>)
-         got.*field = text;
-       else
-         (got.*field).push_back(text);
+       got.*field = text;
      }()),
      ...);
   }

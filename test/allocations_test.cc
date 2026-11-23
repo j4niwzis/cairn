@@ -36,6 +36,23 @@ template <class F> std::size_t asked(F&& f) {
   counting = false;
   return allocations;
 }
+// Room of the test's own to write into: anything that appends, says its
+// size and data, and can be cut back.
+struct room {
+  std::array<char, 1024> chars{};
+  std::size_t used = 0;
+  std::size_t size() const { return used; }
+  const char* data() const { return chars.data(); }
+  bool append(std::string_view s) {
+    if (s.size() > chars.size() - used) return false;
+    std::ranges::copy(s, chars.begin() + static_cast<std::ptrdiff_t>(used));
+    used += s.size();
+    return true;
+  }
+  bool push_back(char c) { return append(std::string_view(&c, 1)); }
+  void resize(std::size_t n) { used = n; }
+  std::string_view view() const { return {chars.data(), used}; }
+};
 constexpr std::string_view wire = "@time=2026-11-23T18:00:00.000Z;msgid=a\\sb;+draft/reply=x :nick!user@host PRIVMSG #mux :hello there";
 }  // namespace
 
@@ -62,24 +79,27 @@ TEST(Allocations, NoneToReadOffAForwardRangeIntoRoom) {
   std::size_t lines = 0;
   EXPECT_EQ(asked([&] {
     auto chars = text | std::views::filter([](char) { return true; });  // not contiguous
-    std::array<char, 600> room;
+    std::array<char, 600> space;
     auto at = std::ranges::begin(chars);
-    const auto first = cairn::try_read(at, std::ranges::end(chars), std::span<char>(room));
+    const auto first = cairn::try_read(at, std::ranges::end(chars), std::span<char>(space));
     if (!first || !first->is("PING")) throw 1;
-    for (const auto& one : cairn::lines(text | std::views::filter([](char) { return true; })))
+    for (const auto& one : cairn::lines(text | std::views::filter([](char) { return true; }), space))
+      if (one) ++lines;
+    for (const auto& one : cairn::lines(text))  // in a row: views into it, no room at all
       if (one) ++lines;
   }), 0u);
-  EXPECT_EQ(lines, 3u);
+  EXPECT_EQ(lines, 6u);
 }
 
 TEST(Allocations, NoneToWriteIntoRoomOrEscape) {
-  cairn::fixed_text<1024> out;
+  room out;
   EXPECT_EQ(asked([&] {
     const auto v = cairn::try_parse(wire);
     if (!v || !cairn::try_write(*v, out)) throw 1;
-    cairn::fixed_text<64> escaped;
-    escaped.append_range(cairn::escaped("a b;c"));
-    if (escaped.view() != "a\\sb\\:c") throw 1;
+    if (!std::ranges::equal(cairn::escaped("a b;c"), std::string_view("a\\sb\\:c"))) throw 1;
+    std::size_t n = 0;
+    for (std::string_view one : v->params()) n += one.size();
+    if (n != 15) throw 1;
   }), 0u);
   EXPECT_EQ(out.view(), std::string(wire) + "\r\n");
 }

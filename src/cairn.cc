@@ -2,7 +2,6 @@
 // All of cairn: import cairn;
 export module cairn;
 
-export import cairn.fixed;
 
 export import cairn.line;
 export import cairn.grammar;

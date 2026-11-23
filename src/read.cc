@@ -7,7 +7,6 @@ export module cairn.read;
 
 import std;
 import splice;
-import cairn.fixed;
 import cairn.line;
 import cairn.grammar;
 
@@ -21,7 +20,7 @@ constexpr line_view assemble(const grammar::raw& got) {
   if (got.tagged) out.tags_text = got.tags;
   if (got.sourced) out.from = parse_source(got.source);
   out.command = got.command;
-  out.params = got.params;
+  out.params_text = got.params;
   return out;
 }
 constexpr std::string_view without_line_end(std::string_view in) {
@@ -53,10 +52,7 @@ struct std_regex {
        constexpr auto field = std::tuple_element_t<I, Tuple>::value;
        if (!m[I + 1].matched) return;
        const std::string_view text(m[I + 1].first, m[I + 1].second);
-       if constexpr (std::same_as<std::remove_cvref_t<decltype(got.*field)>, std::string_view>)
-         got.*field = text;
-       else
-         (got.*field).push_back(text);
+       got.*field = text;
      }()),
      ...);
   }
@@ -169,21 +165,73 @@ constexpr line read(I& at, E end) {
   return *std::move(got);
 }
 
-// The lines of an input range, one at a time as they are walked: each a
-// view into room the view holds (valid until the next), or why it is none.
-// Blank lines between are passed over. Nothing asked of memory.
-template <std::ranges::input_range R, class Grammar = grammars::by_hand>
-  requires std::ranges::view<R>
-class lines_view : public std::ranges::view_interface<lines_view<R, Grammar>> {
+// The lines of characters in a row, one at a time as they are walked: views
+// into them, nothing copied and nothing asked of memory. Blank lines between
+// are passed over.
+template <class Grammar = grammars::by_hand>
+class lines_view : public std::ranges::view_interface<lines_view<Grammar>> {
  public:
   constexpr lines_view() = default;
-  constexpr explicit lines_view(R input) : input_(std::move(input)) {}
+  constexpr explicit lines_view(std::string_view text) : text_(text) {}
   class iterator {
    public:
     using value_type = std::expected<line_view, line_error>;
     using difference_type = std::ptrdiff_t;
     constexpr iterator() = default;
-    constexpr explicit iterator(lines_view* of) : of_(of), at_(std::ranges::begin(of->input_)) { next(); }
+    constexpr explicit iterator(std::string_view rest) : rest_(rest) { next(); }
+    constexpr const value_type& operator*() const { return current_; }
+    constexpr iterator& operator++() {
+      next();
+      return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+    constexpr bool operator==(std::default_sentinel_t) const { return done_; }
+
+   private:
+    constexpr void next() {
+      for (;;) {
+        if (rest_.empty()) {
+          done_ = true;
+          return;
+        }
+        const auto lf = rest_.find('\n');
+        const std::string_view one = rest_.substr(0, lf);
+        rest_ = lf == std::string_view::npos ? std::string_view() : rest_.substr(lf + 1);
+        current_ = try_parse<Grammar>(one);
+        if (current_ || !spl::holds_alternative<errors::empty>(current_.error())) return;
+      }
+    }
+    std::string_view rest_;
+    value_type current_{std::unexpect, errors::empty{}};
+    bool done_ = false;
+  };
+  constexpr iterator begin() const { return iterator(text_); }
+  constexpr std::default_sentinel_t end() const { return {}; }
+
+ private:
+  std::string_view text_;
+};
+template <class Grammar = grammars::by_hand, std::ranges::contiguous_range R>
+  requires std::same_as<std::ranges::range_value_t<R>, char>
+constexpr lines_view<Grammar> lines(const R& text) {
+  return lines_view<Grammar>(std::string_view(std::ranges::data(text), std::ranges::size(text)));
+}
+
+// The lines of any other input range, each read into room of the caller's
+// and handed out as a view into it -- valid until the next. Nothing asked of
+// memory, and no room of its own.
+template <std::ranges::input_range R, class Grammar = grammars::by_hand>
+  requires std::ranges::view<R>
+class lines_into_view : public std::ranges::view_interface<lines_into_view<R, Grammar>> {
+ public:
+  constexpr lines_into_view() = default;
+  constexpr lines_into_view(R input, std::span<char> room) : input_(std::move(input)), room_(room) {}
+  class iterator {
+   public:
+    using value_type = std::expected<line_view, line_error>;
+    using difference_type = std::ptrdiff_t;
+    constexpr iterator() = default;
+    constexpr explicit iterator(lines_into_view* of) : of_(of), at_(std::ranges::begin(of->input_)) { next(); }
     constexpr const value_type& operator*() const { return current_; }
     constexpr iterator& operator++() {
       next();
@@ -199,11 +247,11 @@ class lines_view : public std::ranges::view_interface<lines_view<R, Grammar>> {
           done_ = true;
           return;
         }
-        current_ = try_read<Grammar>(at_, std::ranges::end(of_->input_), std::span<char>(of_->room_));
+        current_ = try_read<Grammar>(at_, std::ranges::end(of_->input_), of_->room_);
         if (current_ || !spl::holds_alternative<errors::empty>(current_.error())) return;
       }
     }
-    lines_view* of_ = nullptr;
+    lines_into_view* of_ = nullptr;
     std::ranges::iterator_t<R> at_{};
     value_type current_{std::unexpect, errors::empty{}};
     bool done_ = false;
@@ -213,9 +261,11 @@ class lines_view : public std::ranges::view_interface<lines_view<R, Grammar>> {
 
  private:
   R input_;
-  std::array<char, max_line_bytes> room_{};
+  std::span<char> room_;
 };
 template <class Grammar = grammars::by_hand, std::ranges::viewable_range R>
-constexpr auto lines(R&& r) { return lines_view<std::views::all_t<R>, Grammar>(std::views::all(std::forward<R>(r))); }
+constexpr auto lines(R&& r, std::span<char> room) {
+  return lines_into_view<std::views::all_t<R>, Grammar>(std::views::all(std::forward<R>(r)), room);
+}
 
 }  // namespace cairn
