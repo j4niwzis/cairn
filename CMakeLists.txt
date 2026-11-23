@@ -114,7 +114,10 @@ if(CAIRN_FUZZ)
   target_compile_options(cairn-parse-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
   target_link_options(cairn-parse-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
   # The distribution's libFuzzer is built on libstdc++ (its own, in std::__cxx11,
-  # apart from libc++'s std::__1): linked beside it.
+  # apart from libc++'s std::__1): linked beside it. The driver puts libFuzzer
+  # after every library, and the distribution's linker drops a library nothing
+  # needed yet (--as-needed): so libstdc++ is kept whether needed yet or not.
+  target_link_options(cairn-parse-fuzz PRIVATE LINKER:--no-as-needed)
   target_link_libraries(cairn-parse-fuzz PRIVATE stdc++)
 endif()
 
