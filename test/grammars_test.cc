@@ -33,6 +33,21 @@ int main() {
       ++failed;
     }
   }
+  // Where by hand reads a line, the regular expressions alone read it too --
+  // not the walk they fall back on for the error.
+  std::size_t alone = 0;
+  for (std::string_view one : cases) {
+    if (!cairn::try_parse<cairn::grammars::by_hand>(one)) continue;
+    const auto got = cairn::grammars::std_regex::read_alone(one);
+    if (!got || cairn::to_owned(*got) != cairn::to_owned(*cairn::try_parse<cairn::grammars::by_hand>(one))) {
+      std::println("std_regex alone does not read [{}]", one);
+      ++failed;
+    }
+    ++alone;
+  }
+  std::println("regular expression of the line's command part: {}", cairn::grammar::regex<cairn::grammar::expect<cairn::errors::bad_command,
+      cairn::grammar::seq<cairn::grammar::capture<&cairn::grammar::raw::command, cairn::grammar::alt<cairn::grammar::many1<cairn::grammar::alpha>,
+      cairn::grammar::repeat<cairn::grammar::digit, 3>>>, cairn::grammar::word_end>>>());
   // Read off an input range through it, a line at a time.
   const std::string wire = "PING :a\r\n:n!u@h PRIVMSG #c :x y\r\n";
   std::vector<std::string> commands;
@@ -46,6 +61,6 @@ int main() {
     if (!spl::holds_alternative<cairn::errors::bad_command>(e.error)) ++failed;
   }
   if (failed) return 1;
-  std::println("cairn: grammar tests passed ({} lines, std_regex as by hand)", cases.size());
+  std::println("cairn: grammar tests passed ({} lines, std_regex as by hand; {} read by the regular expressions alone)", cases.size(), alone);
   return 0;
 }

@@ -34,7 +34,7 @@ set(CAIRN_CONSTEXPR_STEPS 100000000 CACHE STRING
 # One library, its modules in one file set.
 add_library(cairn)
 target_sources(cairn PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/line.cc src/regex.cc src/casemap.cc src/isupport.cc src/messages.cc src/cairn.cc)
+  FILES src/line.cc src/grammar.cc src/read.cc src/casemap.cc src/isupport.cc src/messages.cc src/cairn.cc)
 target_compile_features(cairn PUBLIC cxx_std_26)
 target_link_libraries(cairn PUBLIC splice)
 target_compile_options(cairn PUBLIC
