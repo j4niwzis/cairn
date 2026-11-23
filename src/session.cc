@@ -33,15 +33,34 @@ struct answer {
 };
 
 namespace detail {
-// What a request is answered to the end of, without labeled-response.
-constexpr std::optional<int> ends_with(std::string_view command) {
-  if (command == "WHO") return 315;
-  if (command == "NAMES") return 366;
-  if (command == "WHOIS") return 318;
-  if (command == "LIST") return 323;
-  if (command == "MOTD") return 376;
+// What answers a request, without labeled-response: the replies that are
+// part of its answer, the ones that end it, and the errors that end it as
+// well. Any other numeric is not its, and is handed on.
+struct answered_by {
+  std::span<const int> parts, ends;
+};
+inline constexpr std::array who_parts{352, 354};
+inline constexpr std::array who_ends{315};
+inline constexpr std::array names_parts{353};
+inline constexpr std::array names_ends{366};
+inline constexpr std::array whois_parts{301, 276, 307, 311, 312, 313, 317, 319, 320, 330, 335, 338, 378, 379, 671};
+inline constexpr std::array whois_ends{318};
+inline constexpr std::array list_parts{321, 322};
+inline constexpr std::array list_ends{323};
+inline constexpr std::array motd_parts{375, 372};
+inline constexpr std::array motd_ends{376, 422};
+// What ends any request: the target not there, too few parameters, no
+// such command, not allowed, try again.
+inline constexpr std::array errors{401, 402, 403, 406, 421, 461, 481, 263};
+constexpr std::optional<answered_by> answers_to(std::string_view command) {
+  if (command == "WHO") return answered_by{who_parts, who_ends};
+  if (command == "NAMES") return answered_by{names_parts, names_ends};
+  if (command == "WHOIS") return answered_by{whois_parts, whois_ends};
+  if (command == "LIST") return answered_by{list_parts, list_ends};
+  if (command == "MOTD") return answered_by{motd_parts, motd_ends};
   return std::nullopt;
 }
+constexpr bool in(std::span<const int> set, int n) { return std::ranges::find(set, n) != set.end(); }
 // The transport, as what a message is written into.
 template <class T> struct transport_sink {
   T& t;
@@ -89,7 +108,7 @@ template <transport T> class session {
     if (labeled) out.append("@label=" + label + " ");
     write(what, out);
     wire_.flush();
-    const auto end = detail::ends_with(command);
+    const auto by = detail::answers_to(command);
     answer got;
     std::string batch;  // the labeled-response batch it came in, where it did
     auto& in = wire_.input();
@@ -116,11 +135,12 @@ template <transport T> class session {
           if (!l->is("ACK")) got.lines.push_back(*try_write(*l));
           return got;
         }
-      } else if (end) {
+      } else if (by && l->numeric()) {
         const int n = l->number();
-        if (n >= 200 && n < 600 && n != 1) {
+        const bool part = detail::in(by->parts, n), ends = detail::in(by->ends, n) || detail::in(detail::errors, n);
+        if (part || ends) {
           got.lines.push_back(*try_write(*l));
-          if (n == *end || (*end == 376 && n == 422)) return got;
+          if (ends) return got;
           continue;
         }
       }

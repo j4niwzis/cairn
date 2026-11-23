@@ -110,13 +110,12 @@ struct caps_offered { cap_list caps; };                   // NEW, after registra
 struct caps_withdrawn { cap_list caps; };                 // DEL
 struct logged_in { std::string_view account; };            // 900
 struct sasl_failed { int number = 0; std::string_view text; };  // 902, 904, 905, 906: registration goes on without it
-struct nick_taken { std::string_view tried, next; };       // 432, 433 before registration: the next tried
+struct nick_taken { std::string tried, next; };            // 432, 433 before registration: the next tried (its own copies)
 // A batch gathered, at its end: its lines kept as the wire had them (they
 // outlived the lines they came in), read again with try_parse as views.
 struct batch {
-  std::string_view type;
-  const std::vector<std::string>* params;
-  const std::vector<std::string>* lines;
+  std::string type;
+  std::vector<std::string> params, lines;  // its own: handed over, not pointing into the client
 };
 struct received { cairn::message what; };                  // anything else
 struct closed { std::string_view text; };                  // ERROR
@@ -192,9 +191,9 @@ class client {
         batches_.push_back(std::move(b));
       } else if (!ref.empty() && ref.front() == '-') {
         if (auto open = std::ranges::find(batches_, ref.substr(1), &open_batch::ref); open != batches_.end()) {
-          ended_ = std::move(*open);
+          events::batch done{std::move(open->type), std::move(open->params), std::move(open->lines)};
           batches_.erase(open);
-          on(event_t(events::batch{ended_.type, &ended_.params, &ended_.lines}));
+          on(event_t(std::move(done)));
         }
       }
     } else if (l.is("ERROR")) {
@@ -360,14 +359,14 @@ class client {
     if (n == 1) {
       registered_ = true;
       nick_ = l.param(0);
-      on(event_t(events::registered{nick_}));
+      on(event_t(events::registered{l.param(0)}));  // a view into the line, as the messages are
     } else if (n == 5) {
       server_.take(l);
     } else if ((n == 432 || n == 433) && !registered_) {
-      tried_ = nick_;
+      std::string tried = nick_;
       nick_ = next_nick_ < how_.other_nicks.size() ? how_.other_nicks[next_nick_++] : nick_ + "_";
       write(msg::nick{nick_}, send);
-      on(event_t(events::nick_taken{tried_, nick_}));
+      on(event_t(events::nick_taken{std::move(tried), nick_}));
       return;
     } else if (n == 900) {
       on(event_t(events::logged_in{l.param(2)}));
@@ -396,14 +395,13 @@ class client {
   }
 
   registration how_;
-  std::string nick_, tried_, time_text_;
+  std::string nick_, time_text_;
   std::size_t next_nick_ = 0;
   std::vector<std::string> offered_, enabled_;
   int pending_ = 0;
   bool negotiating_ = true, authenticating_ = false, registered_ = false;
   isupport server_;
   std::vector<open_batch> batches_;
-  open_batch ended_;
   std::optional<sasl::scram_sha256_exchange> scram_;
   bool scram_answered_ = false;
 };

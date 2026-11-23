@@ -78,8 +78,8 @@ static_assert([] {
   const auto done = from(c, ":srv BATCH -b1");
   if (done.events.size() != 1 || !spl::holds_alternative<events::batch>(done.events[0])) return false;
   const auto& b = spl::get<events::batch>(done.events[0]);
-  return b.type == "chathistory" && *b.params == std::vector<std::string>{"#mux"} && b.lines->size() == 2 &&
-         try_parse((*b.lines)[1])->param(1) == "two";
+  return b.type == "chathistory" && b.params == std::vector<std::string>{"#mux"} && b.lines.size() == 2 &&
+         try_parse(b.lines[1])->param(1) == "two";
 }());
 
 // Capabilities offered and withdrawn after registration (cap-notify).

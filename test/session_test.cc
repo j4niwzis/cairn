@@ -54,7 +54,7 @@ static_assert([] {
 // No labeled-response: the answer ends with the reply that ends it.
 static_assert([] {
   scripted wire{":srv CAP * LS :\r\n:srv 001 me :Welcome\r\n:srv NOTICE me :unrelated\r\n"
-                ":srv 353 me = #mux :@alice bob\r\n:srv 366 me #mux :End of NAMES\r\n"};
+                ":srv 301 me bob :away\r\n:srv 353 me = #mux :@alice bob\r\n:srv 366 me #mux :End of NAMES\r\n"};
   std::array<char, 512> room{};
   session s(wire, registration{.nick = "me", .caps = {}}, room);
   int notices = 0;
@@ -63,7 +63,18 @@ static_assert([] {
   };
   if (!s.connect(on)) return false;
   const auto got = s.request(msg::names{commas{"#mux"}}, "NAMES", on);
-  return got && got->lines.size() == 2 && notices == 1;
+  return got && got->lines.size() == 2 && notices == 1;  // the 301 not its: handed on, not taken
+}());
+
+// An error ends a request too.
+static_assert([] {
+  scripted wire{":srv CAP * LS :\r\n:srv 001 me :Welcome\r\n:srv 401 me nobody :No such nick\r\n"};
+  std::array<char, 512> room{};
+  session s(wire, registration{.nick = "me", .caps = {}}, room);
+  const auto on = [](const event_t&) {};
+  if (!s.connect(on)) return false;
+  const auto got = s.request(msg::whois{params_rest{"nobody"}}, "WHOIS", on);
+  return got && got->lines.size() == 1 && try_parse(got->lines[0])->number() == 401;
 }());
 }  // namespace
 
