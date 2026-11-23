@@ -57,7 +57,7 @@ static_assert(written(line{{{"a", "b c;d\\"}, {"k", ""}}, source{"n", "u", "h"},
               "@a=b\\sc\\:d\\\\;k :n!u@h PRIVMSG #c x\r\n");
 static_assert(std::get<errors::bad_parameter>(write(make("PRIVMSG", "a b", "x")).error()).index == 0);
 static_assert(std::holds_alternative<errors::bad_character>(write(make("PRIVMSG", "#c", "a\r\nQUIT")).error()));
-static_assert(std::get<errors::body_too_long>(write(make("PRIVMSG", "#c", std::string(500, 'x'))).error()).bytes == 514);
+static_assert(std::get<errors::body_too_long>(write(make("PRIVMSG", "#c", std::string(500, 'x'))).error()).bytes == 513);  // PRIVMSG #c, a space, 500 bytes, CR LF
 static_assert(write(make("PRIVMSG", "#c", std::string(490, 'x'))).has_value());
 // Into the caller's buffer: appended; refused, the buffer as it was.
 static_assert([] {
