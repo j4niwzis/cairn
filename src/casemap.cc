@@ -6,6 +6,7 @@
 export module cairn.casemap;
 
 import std;
+import splice;
 
 export namespace cairn {
 namespace casemappings {
@@ -37,7 +38,7 @@ constexpr bool operator==(rfc1459, rfc1459) { return true; }
 constexpr bool operator==(strict_rfc1459, strict_rfc1459) { return true; }
 }  // namespace casemappings
 
-using casemapping = std::variant<casemappings::rfc1459, casemappings::ascii, casemappings::strict_rfc1459>;
+using casemapping = spl::variant<casemappings::rfc1459, casemappings::ascii, casemappings::strict_rfc1459>;
 
 // The mapping a name stands for; rfc7613 (PRECIS) and the like folded as
 // ascii, the part every one shares.
@@ -49,7 +50,7 @@ constexpr std::optional<casemapping> casemapping_named(std::string_view name) {
 }
 
 constexpr char fold(char c, const casemapping& m) {
-  return std::visit([c](auto one) { return decltype(one)::fold(c); }, m);
+  return spl::visit([c](auto one) { return decltype(one)::fold(c); }, m);
 }
 // A name folded, as a view.
 constexpr auto folded(std::string_view s, casemapping m) {

@@ -2,6 +2,7 @@
 // cairn's lines, casemapping and ISUPPORT: checked while compiling
 // (static_assert -- each a constant expression) and when run.
 import std;
+import splice;
 import cairn;
 
 namespace {
@@ -39,12 +40,12 @@ static_assert(parsed("@+example.com/foo=bar foo").tags.front().client_only());
 static_assert(*parsed("@time=2026-11-23T18:00:00.000Z :n!u@h PRIVMSG #c :x").tag_value("time") == "2026-11-23T18:00:00.000Z");
 
 // What is not a line.
-static_assert(std::holds_alternative<errors::empty>(try_parse("").error()));
-static_assert(std::holds_alternative<errors::empty>(try_parse("   ").error()));
-static_assert(std::holds_alternative<errors::bad_tags>(try_parse("@ foo").error()));
-static_assert(std::holds_alternative<errors::bad_source>(try_parse(": foo").error()));
-static_assert(std::get<errors::bad_command>(try_parse("12 foo").error()).command == "12");
-static_assert(std::get<errors::bad_command>(try_parse("FO-O bar").error()).command == "FO-O");
+static_assert(spl::holds_alternative<errors::empty>(try_parse("").error()));
+static_assert(spl::holds_alternative<errors::empty>(try_parse("   ").error()));
+static_assert(spl::holds_alternative<errors::bad_tags>(try_parse("@ foo").error()));
+static_assert(spl::holds_alternative<errors::bad_source>(try_parse(": foo").error()));
+static_assert(spl::get<errors::bad_command>(try_parse("12 foo").error()).command == "12");
+static_assert(spl::get<errors::bad_command>(try_parse("FO-O bar").error()).command == "FO-O");
 static_assert(describe(try_parse("FO-O bar").error()) == "malformed command");
 
 // Writing (msg-join): the last parameter after ':' only where it has to be.
@@ -55,9 +56,9 @@ static_assert(written(make("TOPIC", "#c", "")) == "TOPIC #c :\r\n");
 static_assert(written(make("PRIVMSG", "#c", ":)")) == "PRIVMSG #c ::)\r\n");
 static_assert(written(line{{{"a", "b c;d\\"}, {"k", ""}}, source{"n", "u", "h"}, "PRIVMSG", {"#c", "x"}}) ==
               "@a=b\\sc\\:d\\\\;k :n!u@h PRIVMSG #c x\r\n");
-static_assert(std::get<errors::bad_parameter>(try_write(make("PRIVMSG", "a b", "x")).error()).index == 0);
-static_assert(std::holds_alternative<errors::bad_character>(try_write(make("PRIVMSG", "#c", "a\r\nQUIT")).error()));
-static_assert(std::get<errors::body_too_long>(try_write(make("PRIVMSG", "#c", std::string(500, 'x'))).error()).bytes == 513);  // PRIVMSG #c, a space, 500 bytes, CR LF
+static_assert(spl::get<errors::bad_parameter>(try_write(make("PRIVMSG", "a b", "x")).error()).index == 0);
+static_assert(spl::holds_alternative<errors::bad_character>(try_write(make("PRIVMSG", "#c", "a\r\nQUIT")).error()));
+static_assert(spl::get<errors::body_too_long>(try_write(make("PRIVMSG", "#c", std::string(500, 'x'))).error()).bytes == 513);  // PRIVMSG #c, a space, 500 bytes, CR LF
 static_assert(try_write(make("PRIVMSG", "#c", std::string(490, 'x'))).has_value());
 // Into the caller's buffer: appended; refused, the buffer as it was.
 static_assert([] {
@@ -94,7 +95,7 @@ static_assert([] {
   const auto second = try_read(at, end);
   const auto third = try_read(at, end);
   return first && first->command == "PING" && first->param(0) == "a" && second && second->param(1) == "x y" && !third &&
-         std::holds_alternative<errors::bad_command>(third.error()) && at == end;
+         spl::holds_alternative<errors::bad_command>(third.error()) && at == end;
 }());
 static_assert([] {
   const std::string wire = "PING :a\r\n\r\nPONG :b\r\nNICK";
@@ -129,7 +130,7 @@ constexpr isupport told(std::string_view s) {
 constexpr std::string_view libera =
     ":srv 005 me CASEMAPPING=ascii CHANTYPES=# PREFIX=(qaohv)~&@%+ CHANMODES=eIbq,k,flj,CFLMPQScgimnprstuz "
     "NETWORK=Libera.Chat NICKLEN=16 MONITOR=100 WHOX UTF8ONLY CHATHISTORY=50 BOT=B :are supported by this server";
-static_assert(std::holds_alternative<casemappings::ascii>(told(libera).casemapping));
+static_assert(spl::holds_alternative<casemappings::ascii>(told(libera).casemapping));
 static_assert(told(libera).chantypes == "#");
 static_assert(told(libera).prefixes.size() == 5);
 static_assert(told(libera).by_symbol('&')->mode == 'a');

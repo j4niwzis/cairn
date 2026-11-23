@@ -5,6 +5,7 @@
 export module cairn.line;
 
 import std;
+import splice;
 
 export namespace cairn {
 
@@ -40,11 +41,11 @@ constexpr bool operator==(bad_tags, bad_tags) { return true; }
 constexpr bool operator==(bad_source, bad_source) { return true; }
 constexpr bool operator==(bad_character, bad_character) { return true; }
 }  // namespace errors
-using line_error = std::variant<errors::empty, errors::bad_tags, errors::bad_source, errors::bad_command,
+using line_error = spl::variant<errors::empty, errors::bad_tags, errors::bad_source, errors::bad_command,
                                 errors::tags_too_long, errors::body_too_long, errors::bad_parameter,
                                 errors::bad_character>;
 constexpr std::string_view describe(const line_error& e) {
-  return std::visit([](const auto& one) { return std::remove_cvref_t<decltype(one)>::what; }, e);
+  return spl::visit([](const auto& one) { return std::remove_cvref_t<decltype(one)>::what; }, e);
 }
 
 inline constexpr std::size_t max_tags_bytes = 8191;
@@ -374,7 +375,7 @@ class lines_view : public std::ranges::view_interface<lines_view<R>> {
           return;
         }
         current_ = try_read<Grammar>(at_, std::ranges::end(of_->input_));
-        if (current_ || !std::holds_alternative<errors::empty>(current_.error())) return;
+        if (current_ || !spl::holds_alternative<errors::empty>(current_.error())) return;
       }
     }
     lines_view* of_ = nullptr;

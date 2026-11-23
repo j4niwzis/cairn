@@ -5,6 +5,7 @@
 export module cairn.messages;
 
 import std;
+import splice;
 import cairn.line;
 import cairn.isupport;
 
@@ -58,7 +59,7 @@ struct unknown {};
 
 }  // namespace msg
 
-using message_t = std::variant<msg::privmsg, msg::notice, msg::ctcp, msg::action, msg::tagmsg, msg::join, msg::part,
+using message_t = spl::variant<msg::privmsg, msg::notice, msg::ctcp, msg::action, msg::tagmsg, msg::join, msg::part,
                                msg::quit, msg::kick, msg::nick, msg::topic, msg::invite, msg::mode, msg::away,
                                msg::account, msg::chghost, msg::setname, msg::ping, msg::pong, msg::error, msg::cap,
                                msg::authenticate, msg::batch, msg::reply, msg::unknown>;
@@ -130,7 +131,7 @@ constexpr message read(line l, const isupport& server = {}) {
   } else if (l.is("JOIN")) {
     what = msg::join{detail::split_commas(l.param(0)), detail::split_commas(l.param(1)),
                      l.params.size() >= 3 ? p(1) : std::string(), l.params.size() >= 3 ? p(2) : std::string()};
-    if (l.params.size() >= 3) std::get<msg::join>(what).keys.clear();  // extended-join: account and realname, not keys
+    if (l.params.size() >= 3) spl::get<msg::join>(what).keys.clear();  // extended-join: account and realname, not keys
   } else if (l.is("PART")) {
     what = msg::part{detail::split_commas(l.param(0)), p(1)};
   } else if (l.is("QUIT")) {
@@ -178,11 +179,8 @@ constexpr message read(const line_view& l, const isupport& server = {}) { return
 
 // A message as a line to send. Only what a client sends: a reply, an
 // unknown, a batch's end and the like are lines of their own (make()).
-namespace detail {
-template <class... F> struct overloaded : F... { using F::operator()...; };
-}
 constexpr line to_line(const message_t& m) {
-  return std::visit(detail::overloaded{
+  return spl::visit(spl::overloaded{
       [](const msg::privmsg& x) { return make("PRIVMSG", x.target, x.text); },
       [](const msg::notice& x) { return make("NOTICE", x.target, x.text); },
       [](const msg::action& x) { return make("PRIVMSG", x.target, "\x01" "ACTION " + x.text + "\x01"); },

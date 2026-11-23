@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // cairn's typed messages, read and written: static_asserts, and a run.
 import std;
+import splice;
 import cairn;
 
 namespace {
@@ -12,8 +13,8 @@ constexpr isupport libera() {
   return i;
 }
 constexpr message got(std::string_view s) { return read(*try_parse(s), libera()); }
-template <class T> constexpr const T& as(const message& m) { return std::get<T>(m.what); }
-template <class T> constexpr bool is(const message& m) { return std::holds_alternative<T>(m.what); }
+template <class T> constexpr const T& as(const message& m) { return spl::get<T>(m.what); }
+template <class T> constexpr bool is(const message& m) { return spl::holds_alternative<T>(m.what); }
 
 static_assert(as<msg::privmsg>(got(":n!u@h PRIVMSG #mux :hello there")).text == "hello there");
 static_assert(got(":n!u@h PRIVMSG #mux :hi").line.from->nick == "n");
@@ -75,7 +76,7 @@ static_assert(as<msg::mode>(got(out(msg::mode{"#a", {{true, 'o', "alice"}, {fals
 
 int main() {
   const auto m = cairn::read(cairn::parse(":n!u@h PRIVMSG #a :\x01" "ACTION waves\x01"));
-  if (std::get<cairn::msg::action>(m.what).text != "waves") return 1;
+  if (spl::get<cairn::msg::action>(m.what).text != "waves") return 1;
   std::println("cairn: message tests passed");
   return 0;
 }

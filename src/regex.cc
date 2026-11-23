@@ -4,6 +4,7 @@
 export module cairn.regex;
 
 import std;
+import splice;
 import cairn.line;
 
 export namespace cairn::grammars {

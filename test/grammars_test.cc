@@ -2,6 +2,7 @@
 // Every grammar reads every line as the one written by hand does: the same
 // line, or the same error.
 import std;
+import splice;
 import cairn;
 
 namespace {
@@ -42,7 +43,7 @@ int main() {
     (void)cairn::parse<cairn::grammars::std_regex>("12 foo");
     ++failed;
   } catch (const cairn::line_failure& e) {
-    if (!std::holds_alternative<cairn::errors::bad_command>(e.error)) ++failed;
+    if (!spl::holds_alternative<cairn::errors::bad_command>(e.error)) ++failed;
   }
   if (failed) return 1;
   std::println("cairn: grammar tests passed ({} lines, std_regex as by hand)", cases.size());
