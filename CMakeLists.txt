@@ -90,7 +90,7 @@ if(CAIRN_TESTS)
   else()
     set(cairn_gtest gtest_main)
   endif()
-  set(cairn_tests line messages client channels format outgoing text parser session allocations)
+  set(cairn_tests line messages client channels format outgoing text parser join session allocations)
   if(CAIRN_UNICODE)
     list(APPEND cairn_tests precis)
   endif()
@@ -108,6 +108,9 @@ if(CAIRN_FUZZ)
   target_link_libraries(cairn-parse-fuzz PRIVATE cairn)
   target_compile_options(cairn-parse-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
   target_link_options(cairn-parse-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+  # The distribution's libFuzzer is built on libstdc++ (its own, in std::__cxx11,
+  # apart from libc++'s std::__1): linked beside it.
+  target_link_libraries(cairn-parse-fuzz PRIVATE stdc++)
 endif()
 
 # How fast each grammar reads lines (benchmarks/parse_benchmark.cc).
