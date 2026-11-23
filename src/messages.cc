@@ -48,6 +48,52 @@ struct cap { std::string subcommand; std::vector<std::string> params; };
 struct authenticate { std::string data; };
 struct batch { bool start = true; std::string ref, type; std::vector<std::string> params; };
 
+// The rest of what a client and a server say (RFC 1459, RFC 2812, the
+// modern protocol, IRCv3), each a type of its own.
+struct pass { std::string password; };
+struct user { std::string username, mode, unused, realname; };
+struct oper { std::string name, password; };
+struct names { std::vector<std::string> channels; };
+struct list { std::vector<std::string> channels; std::string server; };
+struct motd { std::string server; };
+struct lusers { std::string mask, server; };
+struct version { std::string server; };
+struct stats { std::string query, server; };
+struct links { std::string server, mask; };
+struct time { std::string server; };
+struct connect { std::string target, port, remote; };
+struct trace { std::string target; };
+struct admin { std::string target; };
+struct info { std::string target; };
+struct servlist { std::string mask, type; };
+struct squery { std::string service, text; };
+struct who { std::string mask, options; };
+struct whois { std::vector<std::string> targets; };
+struct whowas { std::string nick, count, server; };
+struct kill { std::string nick, reason; };
+struct rehash {};
+struct die {};
+struct restart {};
+struct summon { std::string user, target, channel; };
+struct users { std::string server; };
+struct wallops { std::string text; };
+struct userhost { std::vector<std::string> nicks; };
+struct ison { std::vector<std::string> nicks; };
+struct squit { std::string server, comment; };
+struct help { std::string subject; };
+struct knock { std::string channel, text; };
+struct silence { std::vector<std::string> masks; };
+// IRCv3.
+struct monitor { std::string action; std::vector<std::string> targets; };  // + - C L S
+struct chathistory { std::string subcommand; std::vector<std::string> params; };
+struct redact { std::string target, msgid, reason; };
+struct markread { std::string target, timestamp; };
+struct webirc { std::string password, gateway, hostname, ip; };
+// Standard replies: what failed, warns or notes, by command and code.
+struct fail { std::string command, code; std::vector<std::string> context; std::string description; };
+struct warn { std::string command, code; std::vector<std::string> context; std::string description; };
+struct note { std::string command, code; std::vector<std::string> context; std::string description; };
+
 // A numeric reply: its number, the nick it is to, the rest.
 struct reply {
   int number = 0;
@@ -62,7 +108,8 @@ struct unknown {};
 using message_t = spl::variant<msg::privmsg, msg::notice, msg::ctcp, msg::action, msg::tagmsg, msg::join, msg::part,
                                msg::quit, msg::kick, msg::nick, msg::topic, msg::invite, msg::mode, msg::away,
                                msg::account, msg::chghost, msg::setname, msg::ping, msg::pong, msg::error, msg::cap,
-                               msg::authenticate, msg::batch, msg::reply, msg::unknown>;
+                               msg::authenticate, msg::batch, msg::pass, msg::user, msg::oper, msg::names, msg::list, msg::motd, msg::lusers, msg::version, msg::stats, msg::links, msg::time, msg::connect, msg::trace, msg::admin, msg::info, msg::servlist, msg::squery, msg::who, msg::whois, msg::whowas, msg::kill, msg::rehash, msg::die, msg::restart, msg::summon, msg::users, msg::wallops, msg::userhost, msg::ison, msg::squit, msg::help, msg::knock, msg::silence, msg::monitor, msg::chathistory, msg::redact, msg::markread, msg::webirc, msg::fail, msg::warn, msg::note,
+                               msg::reply, msg::unknown>;
 
 // A message and the line it came as: its tags (time, msgid, label, batch,
 // account, +draft/reply ...) and source stay there.
@@ -133,18 +180,24 @@ template <shape::text Name, class T, shape::text Shape> struct command {
 
   static constexpr T read(const line& l) {
     T out{};
+    if constexpr (std::is_empty_v<T>) {
+      return out;
+    } else {
     auto& [... field] = out;
     static_assert(sizeof...(field) == slots.size(), "a slot for every field of the type, and a field for every slot");
     std::size_t at = 0;
     std::size_t i = 0;
     ((take(field, slots[i++], l, at)), ...);
     return out;
+    }
   }
   static constexpr line write(const T& value) {
     line l = make(std::string(name));
-    const auto& [... field] = value;
-    std::size_t i = 0;
-    ((put(field, slots[i++], l)), ...);
+    if constexpr (!std::is_empty_v<T>) {
+      const auto& [... field] = value;
+      std::size_t i = 0;
+      ((put(field, slots[i++], l)), ...);
+    }
     return l;
   }
 
@@ -194,7 +247,45 @@ using commands = std::tuple<
     command<"SETNAME", msg::setname, "{realname}">,
     command<"PING", msg::ping, "{token}">,
     command<"ERROR", msg::error, "{text}">,
-    command<"AUTHENTICATE", msg::authenticate, "{data}">>;
+    command<"AUTHENTICATE", msg::authenticate, "{data}">,
+    command<"PASS", msg::pass, "{password}">,
+    command<"USER", msg::user, "{username} {mode} {unused} {realname}">,
+    command<"OPER", msg::oper, "{name} {password}">,
+    command<"NAMES", msg::names, "{channels,?}">,
+    command<"LIST", msg::list, "{channels,?} {server?}">,
+    command<"MOTD", msg::motd, "{server?}">,
+    command<"LUSERS", msg::lusers, "{mask?} {server?}">,
+    command<"VERSION", msg::version, "{server?}">,
+    command<"STATS", msg::stats, "{query?} {server?}">,
+    command<"LINKS", msg::links, "{server?} {mask?}">,
+    command<"TIME", msg::time, "{server?}">,
+    command<"CONNECT", msg::connect, "{target} {port?} {remote?}">,
+    command<"TRACE", msg::trace, "{target?}">,
+    command<"ADMIN", msg::admin, "{target?}">,
+    command<"INFO", msg::info, "{target?}">,
+    command<"SERVLIST", msg::servlist, "{mask?} {type?}">,
+    command<"SQUERY", msg::squery, "{service} {text}">,
+    command<"WHO", msg::who, "{mask?} {options?}">,
+    command<"WHOIS", msg::whois, "{targets...}">,
+    command<"WHOWAS", msg::whowas, "{nick} {count?} {server?}">,
+    command<"KILL", msg::kill, "{nick} {reason}">,
+    command<"REHASH", msg::rehash, "">,
+    command<"DIE", msg::die, "">,
+    command<"RESTART", msg::restart, "">,
+    command<"SUMMON", msg::summon, "{user} {target?} {channel?}">,
+    command<"USERS", msg::users, "{server?}">,
+    command<"WALLOPS", msg::wallops, "{text}">,
+    command<"USERHOST", msg::userhost, "{nicks...}">,
+    command<"ISON", msg::ison, "{nicks...}">,
+    command<"SQUIT", msg::squit, "{server} {comment}">,
+    command<"HELP", msg::help, "{subject?}">,
+    command<"KNOCK", msg::knock, "{channel} {text?}">,
+    command<"SILENCE", msg::silence, "{masks...}">,
+    command<"MONITOR", msg::monitor, "{action} {targets,?}">,
+    command<"CHATHISTORY", msg::chathistory, "{subcommand} {params...}">,
+    command<"REDACT", msg::redact, "{target} {msgid} {reason?}">,
+    command<"MARKREAD", msg::markread, "{target} {timestamp?}">,
+    command<"WEBIRC", msg::webirc, "{password} {gateway} {hostname} {ip}">>;
 
 // The command a type is said as, where it is.
 template <class T, class Table = commands> struct command_of;
@@ -246,6 +337,13 @@ constexpr message read(line l, const isupport& server = {}) {
     if (l.params.size() >= 3) spl::get<msg::join>(what).keys.clear();  // extended-join: account and realname, not keys
   } else if (l.is("MODE")) {
     what = msg::mode{p(0), parse_modes(l.params, 1, server, server.is_channel(l.param(0)))};
+  } else if (l.is("FAIL") || l.is("WARN") || l.is("NOTE")) {
+    std::vector<std::string> context;
+    for (std::size_t i = 2; i + 1 < l.params.size(); ++i) context.push_back(l.params[i]);
+    const std::string description = l.params.size() >= 3 ? l.params.back() : std::string();
+    if (l.is("FAIL")) what = msg::fail{p(0), p(1), std::move(context), description};
+    else if (l.is("WARN")) what = msg::warn{p(0), p(1), std::move(context), description};
+    else what = msg::note{p(0), p(1), std::move(context), description};
   } else if (l.is("PONG")) {
     what = msg::pong{l.params.empty() ? std::string() : l.params.back()};
   } else if (l.is("CAP")) {
@@ -302,6 +400,14 @@ constexpr line to_line(const message_t& m) {
         return l;
       },
       [](const msg::pong& x) { return make("PONG", x.token); },
+      []<class R>(const R& x) -> line
+        requires(std::same_as<R, msg::fail> || std::same_as<R, msg::warn> || std::same_as<R, msg::note>)
+      {
+        line l = make(std::same_as<R, msg::fail> ? "FAIL" : std::same_as<R, msg::warn> ? "WARN" : "NOTE", x.command, x.code);
+        for (const auto& one : x.context) l.params.push_back(one);
+        l.params.push_back(x.description);
+        return l;
+      },
       [](const msg::cap& x) {
         line l = make("CAP", x.subcommand);
         for (const auto& one : x.params) l.params.push_back(one);

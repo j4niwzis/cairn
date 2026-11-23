@@ -9,3 +9,5 @@ export import cairn.read;
 export import cairn.casemap;
 export import cairn.isupport;
 export import cairn.messages;
+export import cairn.numerics;
+export import cairn.client;

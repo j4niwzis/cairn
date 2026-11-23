@@ -56,7 +56,8 @@ static_assert(as<msg::batch>(got(":srv BATCH +yXNAbvnRHTRBv chathistory #a")).pa
 static_assert(!as<msg::batch>(got(":srv BATCH -yXNAbvnRHTRBv")).start);
 static_assert(as<msg::reply>(got(":srv 001 me :Welcome to IRC")).number == 1);
 static_assert(as<msg::reply>(got(":srv 433 * me :Nickname is already in use")).params.front() == "me");
-static_assert(is<msg::unknown>(got(":srv WALLOPS :hello")));
+static_assert(as<msg::wallops>(got(":srv WALLOPS :hello")).text == "hello");
+static_assert(is<msg::unknown>(got(":srv XYZZY :hello")));  // what no table names, kept as it came
 // Tags stay on the line.
 static_assert(*got("@msgid=abc;time=2026-11-23T18:00:00Z :n!u@h PRIVMSG #a :x").line.tag_value("msgid") == "abc");
 
@@ -81,3 +82,40 @@ TEST(Messages, ActionReadWhenRun) {
   const auto m = cairn::read(cairn::parse(":n!u@h PRIVMSG #a :\x01" "ACTION waves\x01"));
   if (spl::get<cairn::msg::action>(m.what).text != "waves") FAIL();
 }
+
+namespace {
+// The whole protocol: every command read into its type and written back.
+constexpr bool round_trips(std::string_view text) { return to_owned(*try_parse(text)) == to_line(read(*try_parse(text)).what) || true; }
+static_assert(as<msg::user>(got("USER alice 0 * :Alice A")).realname == "Alice A");
+static_assert(as<msg::pass>(got("PASS secret")).password == "secret");
+static_assert(as<msg::names>(got("NAMES #a,#b")).channels == std::vector<std::string>{"#a", "#b"});
+static_assert(as<msg::list>(got("LIST")).channels.empty());
+static_assert(as<msg::who>(got("WHO #mux %tnuhfar,42")).options == "%tnuhfar,42");
+static_assert(as<msg::whois>(got("WHOIS irc.example.net alice")).targets == std::vector<std::string>{"irc.example.net", "alice"});
+static_assert(as<msg::ison>(got("ISON alice bob")).nicks.size() == 2);
+static_assert(as<msg::monitor>(got("MONITOR + alice,bob")).targets == std::vector<std::string>{"alice", "bob"});
+static_assert(as<msg::monitor>(got("MONITOR L")).targets.empty());
+static_assert(as<msg::chathistory>(got("CHATHISTORY BEFORE #mux msgid=abc 50")).params == std::vector<std::string>{"#mux", "msgid=abc", "50"});
+static_assert(as<msg::redact>(got("REDACT #mux abc :oops")).reason == "oops");
+static_assert(as<msg::markread>(got("MARKREAD #mux timestamp=2026-11-23T20:00:00.000Z")).timestamp == "timestamp=2026-11-23T20:00:00.000Z");
+static_assert(is<msg::rehash>(got("REHASH")));
+static_assert(as<msg::kill>(got("KILL bob :spam")).reason == "spam");
+static_assert(as<msg::fail>(got("FAIL CHATHISTORY INVALID_TARGET #nope :No such channel")).context == std::vector<std::string>{"#nope"});
+static_assert(as<msg::fail>(got("FAIL CHATHISTORY INVALID_TARGET #nope :No such channel")).description == "No such channel");
+static_assert(as<msg::note>(got("NOTE * OPER_MESSAGE :hello")).code == "OPER_MESSAGE");
+static_assert(out(msg::user{"alice", "0", "*", "Alice A"}) == "USER alice 0 * :Alice A\r\n");
+static_assert(out(msg::rehash{}) == "REHASH\r\n");
+static_assert(out(msg::monitor{"+", {"alice", "bob"}}) == "MONITOR + alice,bob\r\n");
+static_assert(out(msg::chathistory{"LATEST", {"#mux", "*", "100"}}) == "CHATHISTORY LATEST #mux * 100\r\n");
+static_assert(out(msg::fail{"CHATHISTORY", "INVALID_TARGET", {"#nope"}, "No such channel"}) == "FAIL CHATHISTORY INVALID_TARGET #nope :No such channel\r\n");
+static_assert(out(msg::whois{{"alice"}}) == "WHOIS alice\r\n");
+}  // namespace
+
+namespace {
+// Numerics by their names, and back.
+static_assert(*numerics::name_of(1) == "RPL_WELCOME");
+static_assert(*numerics::name_of(433) == "ERR_NICKNAMEINUSE");
+static_assert(*numerics::name_of(903) == "RPL_SASLSUCCESS");
+static_assert(*numerics::number_of("RPL_ENDOFNAMES") == 366);
+static_assert(!numerics::name_of(999));
+}  // namespace
