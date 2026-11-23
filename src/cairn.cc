@@ -13,3 +13,4 @@ export import cairn.numerics;
 export import cairn.client;
 export import cairn.channels;
 export import cairn.format;
+export import cairn.outgoing;

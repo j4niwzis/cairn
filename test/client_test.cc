@@ -96,3 +96,16 @@ TEST(Client, RegistersWhenRun) {
   from(c, ":srv 001 frank :Welcome");
   EXPECT_TRUE(c.registered());
 }
+
+namespace {
+// CTCP asked: answered as a NOTICE, as said; not where it is turned off.
+static_assert([] {
+  client c(registration{.nick = "gina", .caps = {}, .version = "mux 1.0"});
+  c.start();
+  if (sent(from(c, ":hal!h@h PRIVMSG gina :\x01VERSION\x01").send) != std::vector<std::string>{"NOTICE hal :\x01VERSION mux 1.0\x01\r\n"}) return false;
+  if (sent(from(c, ":hal!h@h PRIVMSG gina :\x01PING 12345\x01").send) != std::vector<std::string>{"NOTICE hal :\x01PING 12345\x01\r\n"}) return false;
+  client quiet(registration{.nick = "q", .answer_ctcp = false});
+  quiet.start();
+  return from(quiet, ":hal!h@h PRIVMSG q :\x01VERSION\x01").send.empty();
+}());
+}  // namespace

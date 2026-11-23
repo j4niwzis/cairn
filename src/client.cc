@@ -32,6 +32,11 @@ struct registration {
   std::string username, realname;
   std::string password;  // PASS, for a bouncer; none where empty
   std::optional<sasl_t> sasl;
+  // What CTCP VERSION, SOURCE and CLIENTINFO are answered with; PING and TIME
+  // answered as asked. None answered where `answer_ctcp` is off.
+  bool answer_ctcp = true;
+  std::string version = "cairn";
+  std::string source = "https://github.com/j4niwzis/cairn";
   // The capabilities asked for, where the server offers them.
   std::vector<std::string> caps = {"server-time", "message-tags", "echo-message", "batch", "labeled-response",
                                    "multi-prefix", "extended-join", "away-notify", "account-notify", "account-tag",
@@ -137,7 +142,10 @@ class client {
       numeric(std::move(l), r);
     } else {
       if (l.is("NICK") && l.from && l.from->nick == nick_) nick_ = l.param(0);
-      r.events.push_back(events::received{read(std::move(l), server_)});
+      auto m = read(std::move(l), server_);
+      if (const auto* asked = m.what.template get_if<msg::ctcp>(); asked && !asked->reply && how_.answer_ctcp && m.line.from)
+        if (auto answer = ctcp_answer(*asked, m.line.from->nick)) r.send.push_back(to_line(*answer));
+      r.events.push_back(events::received{std::move(m)});
     }
     return r;
   }
@@ -151,6 +159,23 @@ class client {
   constexpr const isupport& server() const { return server_; }
 
  private:
+  // A CTCP request answered (as a NOTICE), where it is one answered.
+  constexpr std::optional<msg::ctcp> ctcp_answer(const msg::ctcp& asked, std::string_view who) const {
+    const auto reply = [&](std::string text) { return msg::ctcp{std::string(who), asked.command, std::move(text), true}; };
+    if (asked.command == "VERSION") return reply(how_.version);
+    if (asked.command == "SOURCE") return reply(how_.source);
+    if (asked.command == "PING") return reply(asked.text);
+    if (asked.command == "CLIENTINFO") return reply("ACTION CLIENTINFO PING SOURCE TIME VERSION");
+    if (asked.command == "TIME") return reply(time_text_);
+    return std::nullopt;
+  }
+
+ public:
+  // What CTCP TIME is answered with, the caller's clock's (none kept here).
+  constexpr void set_time_text(std::string text) { time_text_ = std::move(text); }
+
+ private:
+  std::string time_text_;
   struct open_batch {
     std::string ref;
     events::batch gathered;
