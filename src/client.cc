@@ -233,6 +233,12 @@ class client {
   constexpr const std::vector<std::string>& caps() const { return enabled_; }
   constexpr bool has_cap(std::string_view name) const { return std::ranges::find(enabled_, name) != enabled_.end(); }
   constexpr const isupport& server() const { return server_; }
+  // What the server offered a capability with (CAP LS 302's values): "port=6697,duration=300" for sts; nothing where it was not offered.
+  constexpr std::optional<std::string_view> offered_value(std::string_view name) const {
+    for (const auto& [key, value] : offered_values_)
+      if (key == name) return std::string_view(value);
+    return std::nullopt;
+  }
   // What CTCP TIME is answered with, the caller's clock's (none kept here).
   constexpr void set_time_text(std::string text) { time_text_ = std::move(text); }
 
@@ -288,6 +294,7 @@ class client {
     if (sub == "LS" || sub == "NEW") {
       for (const std::string_view one : cap_list{list}) {
         offered_.emplace_back(one.substr(0, one.find('=')));
+        offered_values_.emplace_back(one.substr(0, one.find('=')), one.find('=') == std::string_view::npos ? std::string_view() : one.substr(one.find('=') + 1));
         if (one.starts_with("sasl=")) sasl_offered_ = one.substr(5);
       }
       if (more) return;
@@ -457,6 +464,7 @@ class client {
   std::size_t next_nick_ = 0;
   std::vector<std::string> offered_, enabled_;
   std::string sasl_offered_, scram_in_;
+  std::vector<std::pair<std::string, std::string>> offered_values_;
   int pending_ = 0;
   bool negotiating_ = true, authenticating_ = false, registered_ = false;
   isupport server_;

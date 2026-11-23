@@ -178,6 +178,14 @@ static_assert([] {
   const auto ack = from(c, ":srv CAP * ACK :sasl");
   return happened<events::sasl_failed>(ack) && ack.sent == "CAP END\r\n";
 }());
+// The values of what is offered, asked by name.
+static_assert([] {
+  client c(registration{.nick = "h", .caps = {}});
+  started(c);
+  from(c, ":srv CAP * LS :sts=port=6697,duration=300 batch");
+  return c.offered_value("sts") == std::optional<std::string_view>("port=6697,duration=300") && c.offered_value("batch") == std::optional<std::string_view>("") &&
+         !c.offered_value("sasl");
+}());
 }  // namespace
 
 TEST(Client, RegistersWhenRun) {
