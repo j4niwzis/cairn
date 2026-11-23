@@ -14,6 +14,7 @@ import splice;
 import cairn.line;
 import cairn.read;
 import cairn.isupport;
+import cairn.casemap;
 import cairn.messages;
 import cairn.crypto;
 import cairn.sasl;
@@ -127,23 +128,31 @@ using event_t = spl::variant<events::registered, events::caps_enabled, events::c
 namespace detail {
 // Base64 of the bytes a few views make together, a character at a time
 // into the sink: nothing made.
+constexpr auto commas_of(std::string_view s) {
+  return s | std::views::split(',') | std::views::transform([](auto part) { return std::string_view(part.begin(), part.end()); });
+}
 template <class Out> struct base64_out {
   Out& out;
   std::size_t written = 0;
   std::uint32_t held = 0;
   int count = 0;
   static constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  constexpr void put(char c) { out.push_back(c), ++written; }
+  // Four characters a write, not one.
+  constexpr void put4(char a, char b, char c, char d) {
+    const char group[4] = {a, b, c, d};
+    out.append(std::string_view(group, 4)), written += 4;
+  }
+  constexpr char at(int shift) const { return alphabet[(held >> shift) & 63]; }
   constexpr void byte(unsigned char b) {
     held = (held << 8) | b;
     if (++count == 3) {
-      put(alphabet[(held >> 18) & 63]), put(alphabet[(held >> 12) & 63]), put(alphabet[(held >> 6) & 63]), put(alphabet[held & 63]);
+      put4(at(18), at(12), at(6), at(0));
       held = 0, count = 0;
     }
   }
   constexpr void finish() {
-    if (count == 1) held <<= 16, put(alphabet[(held >> 18) & 63]), put(alphabet[(held >> 12) & 63]), put('='), put('=');
-    if (count == 2) held <<= 8, put(alphabet[(held >> 18) & 63]), put(alphabet[(held >> 12) & 63]), put(alphabet[(held >> 6) & 63]), put('=');
+    if (count == 1) held <<= 16, put4(at(18), at(12), '=', '=');
+    if (count == 2) held <<= 8, put4(at(18), at(12), at(6), '=');
   }
 };
 }  // namespace detail
@@ -167,11 +176,21 @@ class client {
   // A line the server sent: what to send written into `send`, what came of
   // it told to `on` (an event_t, by the overload that takes it).
   template <class Out, class On> constexpr void feed(const line_view& l, Out& send, On&& on) {
-    // Inside a batch: kept, as the wire has it, until the batch ends.
-    if (const auto ref = l.tag_value("batch"); ref && !l.is("BATCH")) {
-      for (auto& open : batches_)
-        if (std::ranges::equal(*ref, std::string_view(open.ref))) {
-          open.lines.push_back(*try_write(l));
+    // Inside a batch: kept, as the wire has it, in the outermost batch it is
+    // in, until that ends -- a batch inside it (its BATCH lines too) kept in
+    // it in order, for the caller to read as it reads the rest.
+    if (const auto ref = l.tag_value("batch")) {
+      for (std::size_t i = 0; i < batches_.size(); ++i)
+        if (std::ranges::equal(*ref, std::string_view(batches_[i].ref))) {
+          open_batch& root = batches_[root_of(i)];
+          if (auto wire = try_write(l)) root.lines.push_back(std::move(*wire));
+          if (l.is("BATCH")) {
+            const std::string_view inner = l.param(0);
+            if (inner.size() > 1 && inner.front() == '+')
+              batches_.push_back(open_batch{std::string(inner.substr(1)), std::string(l.param(1)), {}, {}, batches_[i].ref});
+            else if (inner.size() > 1 && inner.front() == '-')
+              std::erase_if(batches_, [&](const open_batch& b) { return !b.outer.empty() && b.ref == inner.substr(1); });
+          }
           return;
         }
     }
@@ -183,13 +202,13 @@ class client {
       authenticate(l, send);
     } else if (l.is("BATCH")) {
       const std::string_view ref = l.param(0);
-      if (!ref.empty() && ref.front() == '+') {
-        open_batch b{std::string(ref.substr(1)), std::string(l.param(1)), {}, {}};
+      if (ref.size() > 1 && ref.front() == '+') {
+        open_batch b{std::string(ref.substr(1)), std::string(l.param(1)), {}, {}, {}};
         std::size_t i = 0;
         for (std::string_view one : l.params())
           if (i++ >= 2) b.params.emplace_back(one);
         batches_.push_back(std::move(b));
-      } else if (!ref.empty() && ref.front() == '-') {
+      } else if (ref.size() > 1 && ref.front() == '-') {
         if (auto open = std::ranges::find(batches_, ref.substr(1), &open_batch::ref); open != batches_.end()) {
           events::batch done{std::move(open->type), std::move(open->params), std::move(open->lines)};
           batches_.erase(open);
@@ -201,7 +220,7 @@ class client {
     } else if (l.numeric()) {
       numeric(l, send, on);
     } else {
-      if (l.is("NICK") && l.from && l.from->nick == nick_) nick_ = l.param(0);
+      if (l.is("NICK") && l.from && equal(l.from->nick, nick_, server_.casemapping)) nick_ = l.param(0);
       const message m = read(l);
       if (const auto* asked = m.what.template get_if<msg::ctcp>(); asked && !asked->reply && how_.answer_ctcp && l.from)
         ctcp_answer(*asked, l.from->nick, send);
@@ -221,7 +240,17 @@ class client {
   struct open_batch {
     std::string ref, type;
     std::vector<std::string> params, lines;
+    std::string outer;  // the batch it is inside, where it is
   };
+  // The outermost batch the one at `i` is inside.
+  constexpr std::size_t root_of(std::size_t i) const {
+    while (!batches_[i].outer.empty()) {
+      const auto up = std::ranges::find(batches_, batches_[i].outer, &open_batch::ref);
+      if (up == batches_.end()) break;
+      i = static_cast<std::size_t>(up - batches_.begin());
+    }
+    return i;
+  }
 
   constexpr bool wants(std::string_view cap) const {
     if (cap == "sasl") return how_.sasl.has_value();
@@ -234,17 +263,21 @@ class client {
     }
   }
   // CAP REQ written straight from the names wanted, as they are found.
-  template <class Out, class Names> constexpr bool ask_for(Out& send, const Names& names) {
-    bool any = false;
+  // As many lines as it takes, each under 510 bytes; how many it wrote.
+  template <class Out, class Names> constexpr int ask_for(Out& send, const Names& names) {
+    int lines = 0;
+    std::size_t in_line = 0;
     for (const std::string_view name : names) {
       const std::string_view bare = name.substr(0, name.find('='));
       if (!wants(bare) || has_cap(bare)) continue;
-      send.append(any ? " " : "CAP REQ :");
+      if (in_line > 0 && in_line + 1 + bare.size() > 510) send.append("\r\n"), in_line = 0;
+      if (in_line == 0) send.append("CAP REQ :"), in_line = 9, ++lines;
+      else send.append(" "), ++in_line;
       send.append(bare);
-      any = true;
+      in_line += bare.size();
     }
-    if (any) send.append("\r\n");
-    return any;
+    if (in_line > 0) send.append("\r\n");
+    return lines;
   }
   template <class Out, class On> constexpr void cap(const line_view& l, Out& send, On& on) {
     const std::string_view sub = l.param(1);
@@ -253,11 +286,14 @@ class client {
     std::string_view list;
     for (std::string_view one : l.params()) list = one;  // the last
     if (sub == "LS" || sub == "NEW") {
-      for (const std::string_view one : cap_list{list}) offered_.emplace_back(one.substr(0, one.find('=')));
+      for (const std::string_view one : cap_list{list}) {
+        offered_.emplace_back(one.substr(0, one.find('=')));
+        if (one.starts_with("sasl=")) sasl_offered_ = one.substr(5);
+      }
       if (more) return;
       const bool asked = sub == "LS" ? ask_for(send, offered_) : ask_for(send, cap_list{list});
       if (sub == "NEW") on(event_t(events::caps_offered{cap_list{list}}));
-      if (asked) ++pending_;
+      if (asked) pending_ += asked;
       else if (sub == "LS") end_negotiation(send);
     } else if (sub == "ACK") {
       bool sasl = false;
@@ -271,12 +307,20 @@ class client {
       }
       on(event_t(events::caps_enabled{list}));
       if (pending_ > 0) --pending_;
-      if (sasl && how_.sasl && negotiating_) {
+      const std::string_view mechanism =
+          how_.sasl ? spl::visit(spl::overloaded{[](const sasl::plain&) { return std::string_view("PLAIN"); },
+                                                 [](const sasl::external&) { return std::string_view("EXTERNAL"); },
+                                                 [](const sasl::scram_sha256&) { return std::string_view("SCRAM-SHA-256"); }},
+                                 *how_.sasl)
+                    : std::string_view();
+      // sasl=PLAIN,EXTERNAL: the mechanisms it takes (none said: any).
+      const bool offered = sasl_offered_.empty() || std::ranges::contains(detail::commas_of(sasl_offered_), mechanism);
+      if (sasl && how_.sasl && negotiating_ && !offered) {
+        on(event_t(events::sasl_failed{908, sasl_offered_}));  // RPL_SASLMECHS: not one it takes
+        if (pending_ == 0) end_negotiation(send);
+      } else if (sasl && how_.sasl && negotiating_) {
         send.append("AUTHENTICATE ");
-        send.append(spl::visit(spl::overloaded{[](const sasl::plain&) { return std::string_view("PLAIN"); },
-                                               [](const sasl::external&) { return std::string_view("EXTERNAL"); },
-                                               [](const sasl::scram_sha256&) { return std::string_view("SCRAM-SHA-256"); }},
-                               *how_.sasl));
+        send.append(mechanism);
         send.append("\r\n");
         authenticating_ = true;
       } else if (pending_ == 0 && !authenticating_) {
@@ -308,10 +352,13 @@ class client {
                      struct chunked {
                        Out& out;
                        std::size_t in_line = 0;
-                       constexpr void push_back(char c) {
-                         if (in_line == 0) out.append("AUTHENTICATE ");
-                         out.push_back(c);
-                         if (++in_line == 400) out.append("\r\n"), in_line = 0;
+                       constexpr void append(std::string_view s) {
+                         while (!s.empty()) {
+                           if (in_line == 0) out.append("AUTHENTICATE ");
+                           const std::string_view now = s.substr(0, 400 - in_line);
+                           out.append(now), in_line += now.size(), s.remove_prefix(now.size());
+                           if (in_line == 400) out.append("\r\n"), in_line = 0;
+                         }
                        }
                      } lines{send};
                      detail::base64_out<chunked> b64{lines};
@@ -329,10 +376,18 @@ class client {
   // first, "+" after its final once it proved it knows the password -- or
   // "*", the exchange given up, where it did not.
   template <class Out> constexpr void scram_step(const sasl::scram_sha256& how, std::string_view given, Out& send) {
+    // Base64 in pieces of 400, one of exactly 400 followed by "+".
     const auto say = [&](std::string_view message) {
-      send.append("AUTHENTICATE ");
-      send.append(message.empty() ? "+" : crypto::base64_encode(crypto::to_bytes(message)));
-      send.append("\r\n");
+      const std::string b64 = message.empty() ? std::string() : crypto::base64_encode(crypto::to_bytes(message));
+      std::string_view rest = b64;
+      for (;;) {
+        send.append("AUTHENTICATE ");
+        send.append(rest.empty() ? std::string_view("+") : rest.substr(0, 400));
+        send.append("\r\n");
+        const bool full = rest.size() >= 400;
+        rest.remove_prefix(std::min<std::size_t>(rest.size(), 400));
+        if (rest.empty() && !full) break;
+      }
     };
     if (given == "+" && !scram_) {
       scram_.emplace(how.login, how.password, how.nonce, how.minimum_iterations);
@@ -340,7 +395,10 @@ class client {
       return;
     }
     if (!scram_) return;
-    const auto decoded = crypto::base64_decode(given);
+    // The server's message in pieces of 400 too: kept until the last.
+    if (given != "+") scram_in_.append(given);
+    if (given.size() == 400) return;
+    const auto decoded = crypto::base64_decode(std::exchange(scram_in_, {}));
     if (!decoded) return send.append("AUTHENTICATE *\r\n"), void();
     const std::string text(decoded->begin(), decoded->end());
     if (!scram_answered_) {
@@ -398,6 +456,7 @@ class client {
   std::string nick_, time_text_;
   std::size_t next_nick_ = 0;
   std::vector<std::string> offered_, enabled_;
+  std::string sasl_offered_, scram_in_;
   int pending_ = 0;
   bool negotiating_ = true, authenticating_ = false, registered_ = false;
   isupport server_;

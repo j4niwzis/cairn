@@ -34,6 +34,15 @@ static_assert([] {
   if (f.take(0.0) || f.wait(0.0) != 0.5) return false;
   return f.take(0.5) && !f.take(0.5) && f.take(1.0);
 }());
+// A room under 4 is kept to, not raised.
+static_assert(std::ranges::all_of(pieces("abc def ghi", 2), [](std::string_view one) { return one.size() <= 2; }));
+// A clock gone back gives nothing back.
+static_assert([] {
+  flood f(1, 1);
+  if (!f.take(10)) return false;
+  f.wait(5);
+  return f.wait(10.5) > 0;
+}());
 }  // namespace
 
 TEST(Outgoing, SplitsWhenRun) { EXPECT_EQ(split("aaaa bbbb", 4).size(), 2u); }

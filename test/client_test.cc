@@ -115,6 +115,69 @@ static_assert([] {
   const std::string sent = from(c, "AUTHENTICATE +").sent;  // 1+1+1+1+296 = 300 bytes: 400 base64 characters
   return sent.size() == 13 + 400 + 2 + 16 && sent.ends_with("AUTHENTICATE +\r\n");
 }());
+// A batch inside a batch: its lines (and its BATCH lines) kept in the outer
+// one, in order; one event, at the outer one's end.
+static_assert([] {
+  client c(registration{.nick = "eve", .caps = {}});
+  started(c);
+  from(c, ":srv BATCH +out chathistory #mux");
+  from(c, "@batch=out :srv BATCH +in draft/multiline #mux");
+  from(c, "@batch=in :a!u@h PRIVMSG #mux :one");
+  if (!from(c, "@batch=out :srv BATCH -in").events.empty()) return false;
+  from(c, "@batch=out :b!u@h PRIVMSG #mux :two");
+  const auto ended = from(c, ":srv BATCH -out");
+  if (ended.events.size() != 1) return false;
+  const auto& b = *ended.events[0].get_if<events::batch>();
+  return b.type == "chathistory" && b.lines.size() == 4 && try_parse(b.lines[1])->param(1) == "one" &&
+         try_parse(b.lines[3])->param(1) == "two";
+}());
+
+// A BATCH without its reference: nothing opened, nothing thrown.
+static_assert([] {
+  client c(registration{.nick = "eve", .caps = {}});
+  started(c);
+  return from(c, ":srv BATCH +").events.empty() && from(c, ":srv BATCH").events.empty();
+}());
+
+// The own nick found by the server's casemapping.
+static_assert([] {
+  client c(registration{.nick = "Alice", .caps = {}});
+  started(c);
+  from(c, ":srv CAP * LS :");
+  from(c, ":srv 001 Alice :Welcome");
+  from(c, ":alice!u@h NICK :Bob");
+  return c.nick() == "Bob";
+}());
+
+// CAP REQ in lines under 510 bytes.
+static_assert([] {
+  std::vector<std::string> wanted;
+  std::string offered;
+  for (int i = 0; i < 60; ++i) {
+    std::string name = "vendor.example/capability-" + std::string(1, static_cast<char>('a' + i % 26)) + std::string(1, static_cast<char>('a' + i / 26));
+    offered += (i ? " " : "") + name;
+    wanted.push_back(name);
+  }
+  client c(registration{.nick = "f", .caps = wanted});
+  started(c);
+  const std::string sent = from(c, ":srv CAP * LS :" + offered).sent;
+  std::size_t lines = 0;
+  for (auto line : sent | std::views::split(std::string_view("\r\n"))) {
+    if (std::ranges::empty(line)) continue;
+    if (std::ranges::distance(line) > 510) return false;
+    ++lines;
+  }
+  return lines >= 3;
+}());
+
+// SASL with a mechanism the server does not take: not tried.
+static_assert([] {
+  client c(registration{.nick = "g", .sasl = sasl::scram_sha256{"g", "pw", "nonce"}, .caps = {}});
+  started(c);
+  from(c, ":srv CAP * LS :sasl=PLAIN,EXTERNAL");
+  const auto ack = from(c, ":srv CAP * ACK :sasl");
+  return happened<events::sasl_failed>(ack) && ack.sent == "CAP END\r\n";
+}());
 }  // namespace
 
 TEST(Client, RegistersWhenRun) {

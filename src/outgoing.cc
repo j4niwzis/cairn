@@ -23,7 +23,7 @@ class pieces_view : public std::ranges::view_interface<pieces_view> {
     using value_type = std::string_view;
     using difference_type = std::ptrdiff_t;
     constexpr iterator() = default;
-    constexpr iterator(std::string_view rest, std::size_t room) : rest_(rest), room_(std::max<std::size_t>(room, 4)) { next(); }
+    constexpr iterator(std::string_view rest, std::size_t room) : rest_(rest), room_(std::max<std::size_t>(room, 1)) { next(); }
     constexpr std::string_view operator*() const { return current_; }
     constexpr iterator& operator++() {
       next();
@@ -102,8 +102,9 @@ class flood {
 
  private:
   constexpr void refill(double now) {
+    // A clock that went back is not time given back: the last stays.
     if (last_ >= 0 && now > last_) tokens_ = std::min(burst_, tokens_ + (now - last_) / interval_);
-    last_ = now;
+    if (last_ < 0 || now > last_) last_ = now;
   }
   double interval_, burst_, tokens_, last_ = -1;
 };

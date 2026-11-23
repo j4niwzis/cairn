@@ -110,6 +110,11 @@ template <transport T> class session {
     wire_.flush();
     const auto by = detail::answers_to(command);
     answer got;
+    // A line kept as the wire has it (the parser takes no line it could not
+    // write back; one it could not is left out, never dereferenced).
+    const auto keep = [&](const line_view& one) {
+      if (auto wire = try_write(one)) got.lines.push_back(std::move(*wire));
+    };
     std::string batch;  // the labeled-response batch it came in, where it did
     auto& in = wire_.input();
     for (;;) {
@@ -122,24 +127,24 @@ template <transport T> class session {
         return v && std::ranges::equal(*v, want);
       };
       if (labeled) {
-        if (l->is("BATCH") && tagged("label", label)) {
+        if (l->is("BATCH") && tagged("label", label) && l->param(0).size() > 1 && l->param(0).front() == '+') {
           batch = std::string(l->param(0).substr(1));
           continue;
         }
         if (!batch.empty() && l->is("BATCH") && l->param(0) == "-" + batch) return got;
         if (!batch.empty() && tagged("batch", batch)) {
-          got.lines.push_back(*try_write(*l));
+          keep(*l);
           continue;
         }
         if (tagged("label", label)) {
-          if (!l->is("ACK")) got.lines.push_back(*try_write(*l));
+          if (!l->is("ACK")) keep(*l);
           return got;
         }
       } else if (by && l->numeric()) {
         const int n = l->number();
         const bool part = detail::in(by->parts, n), ends = detail::in(by->ends, n) || detail::in(detail::errors, n);
         if (part || ends) {
-          got.lines.push_back(*try_write(*l));
+          keep(*l);
           if (ends) return got;
           continue;
         }
