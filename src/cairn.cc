@@ -11,3 +11,4 @@ export import cairn.isupport;
 export import cairn.messages;
 export import cairn.numerics;
 export import cairn.client;
+export import cairn.channels;
