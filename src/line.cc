@@ -240,7 +240,22 @@ constexpr source_view parse_source(std::string_view in) {
 // A line, as views into what is given -- without its CR LF (a trailing CR
 // or LF is taken off). Tags and source optional; any number of spaces
 // between parts; the last parameter after ':' keeps its spaces.
+namespace grammars {
+// The grammar written out by hand: constexpr, the reference the others are
+// checked against.
+struct by_hand {
+  static constexpr std::expected<line_view, line_error> try_parse(std::string_view in);
+};
+}  // namespace grammars
+
+// How a line is read is a grammar's: by hand, std::regex (cairn.regex), or
+// scan's automaton (cairn.scan) -- each the same lines out of the same text.
+template <class Grammar = grammars::by_hand>
 constexpr std::expected<line_view, line_error> try_parse(std::string_view in) {
+  return Grammar::try_parse(in);
+}
+
+constexpr std::expected<line_view, line_error> grammars::by_hand::try_parse(std::string_view in) {
   while (!in.empty() && (in.back() == '\n' || in.back() == '\r')) in.remove_suffix(1);
   line_view out;
   in = detail::skip_spaces(in);
@@ -284,8 +299,9 @@ constexpr std::expected<line_view, line_error> try_parse(std::string_view in) {
   }
   return out;
 }
+template <class Grammar = grammars::by_hand>
 constexpr line_view parse(std::string_view in) {
-  auto got = try_parse(in);
+  auto got = try_parse<Grammar>(in);
   if (!got) throw line_failure(std::move(got.error()));
   return *std::move(got);
 }
@@ -306,7 +322,7 @@ constexpr const line& to_owned(const line& l) { return l; }
 // One line from an input range of characters, up to and with its LF: the
 // iterator left after it, for the next. A line of its own -- the range need
 // not keep what it gave. At the end of the input with nothing read: empty.
-template <std::input_iterator I, std::sentinel_for<I> E>
+template <class Grammar = grammars::by_hand, std::input_iterator I, std::sentinel_for<I> E>
   requires std::convertible_to<std::iter_reference_t<I>, char>
 constexpr std::expected<line, line_error> try_read(I& at, E end) {
   std::string text;
@@ -316,21 +332,21 @@ constexpr std::expected<line, line_error> try_read(I& at, E end) {
     if (c == '\n') break;
     text += c;
   }
-  auto got = try_parse(text);
+  auto got = try_parse<Grammar>(text);
   if (!got) return std::unexpected(std::move(got.error()));
   return to_owned(*got);
 }
-template <std::input_iterator I, std::sentinel_for<I> E>
+template <class Grammar = grammars::by_hand, std::input_iterator I, std::sentinel_for<I> E>
   requires std::convertible_to<std::iter_reference_t<I>, char>
 constexpr line read(I& at, E end) {
-  auto got = try_read(at, end);
+  auto got = try_read<Grammar>(at, end);
   if (!got) throw line_failure(std::move(got.error()));
   return *std::move(got);
 }
 
 // The lines of an input range, one at a time as they are walked: each a
 // line, or why it is none. Blank lines between are passed over.
-template <std::ranges::input_range R>
+template <std::ranges::input_range R, class Grammar = grammars::by_hand>
   requires std::ranges::view<R>
 class lines_view : public std::ranges::view_interface<lines_view<R>> {
  public:
@@ -357,7 +373,7 @@ class lines_view : public std::ranges::view_interface<lines_view<R>> {
           done_ = true;
           return;
         }
-        current_ = try_read(at_, std::ranges::end(of_->input_));
+        current_ = try_read<Grammar>(at_, std::ranges::end(of_->input_));
         if (current_ || !std::holds_alternative<errors::empty>(current_.error())) return;
       }
     }
@@ -372,8 +388,8 @@ class lines_view : public std::ranges::view_interface<lines_view<R>> {
  private:
   R input_;
 };
-template <std::ranges::viewable_range R>
-constexpr auto lines(R&& r) { return lines_view<std::views::all_t<R>>(std::views::all(std::forward<R>(r))); }
+template <class Grammar = grammars::by_hand, std::ranges::viewable_range R>
+constexpr auto lines(R&& r) { return lines_view<std::views::all_t<R>, Grammar>(std::views::all(std::forward<R>(r))); }
 
 // A line as the wire takes it, CR LF ended, appended to `out` -- or why it
 // cannot be, `out` then as it was: the limits held before anything is

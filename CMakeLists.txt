@@ -16,7 +16,7 @@ set(CAIRN_CONSTEXPR_STEPS 100000000 CACHE STRING
 # One library, its modules in one file set.
 add_library(cairn)
 target_sources(cairn PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/line.cc src/casemap.cc src/isupport.cc src/messages.cc src/cairn.cc)
+  FILES src/line.cc src/regex.cc src/casemap.cc src/isupport.cc src/messages.cc src/cairn.cc)
 target_compile_features(cairn PUBLIC cxx_std_26)
 target_compile_options(cairn PUBLIC
   $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fconstexpr-steps=${CAIRN_CONSTEXPR_STEPS}>)
@@ -25,7 +25,7 @@ add_library(cairn::cairn ALIAS cairn)
 # The tests: static_asserts, checked while they compile, and a run each.
 if(CAIRN_TESTS)
   enable_testing()
-  foreach(name IN ITEMS line messages)
+  foreach(name IN ITEMS line messages grammars)
     add_executable(cairn-${name}-test test/${name}_test.cc)
     target_link_libraries(cairn-${name}-test PRIVATE cairn)
     add_test(NAME ${name} COMMAND cairn-${name}-test)

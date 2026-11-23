@@ -3,6 +3,7 @@
 export module cairn;
 
 export import cairn.line;
+export import cairn.regex;
 export import cairn.casemap;
 export import cairn.isupport;
 export import cairn.messages;
