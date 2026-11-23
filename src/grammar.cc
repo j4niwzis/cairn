@@ -171,47 +171,59 @@ template <class E, class N> struct walker<expect<E, N>> {
 
 // ---- as a regular expression ----------------------------------------------
 
-template <class N> struct regex_of;
-template <class N> constexpr std::string regex() { return regex_of<N>::text(); }
+// The dialects it is written in: what each says for what the other has not.
+// std::regex has lookahead; scan has none, and a word's end is checked by
+// what reads with it, after the part.
+struct ecmascript { static constexpr std::string_view word_end = "(?= |$)"; };
+struct scan_dialect { static constexpr std::string_view word_end = ""; };
+template <class N, class D> struct regex_of;
+template <class N, class D = ecmascript> constexpr std::string regex() { return regex_of<N, D>::text(); }
 constexpr std::string escaped_char(char c) {
   return std::string_view("\\^$.|?*+()[]{}/-").find(c) != std::string_view::npos ? std::string{'\\', c} : std::string{c};
 }
-template <char C> struct regex_of<lit<C>> { static constexpr std::string text() { return escaped_char(C); } };
-template <fixed_string S> struct regex_of<not_of<S>> {
+template <char C, class D> struct regex_of<lit<C>, D> { static constexpr std::string text() { return escaped_char(C); } };
+template <fixed_string S, class D> struct regex_of<not_of<S>, D> {
   static constexpr std::string text() {
     std::string out = "[^";
     for (char c : S.view()) out += escaped_char(c);
     return out + "]";
   }
 };
-template <> struct regex_of<alpha> { static constexpr std::string text() { return "[A-Za-z]"; } };
-template <> struct regex_of<digit> { static constexpr std::string text() { return "[0-9]"; } };
-template <class... N> struct regex_of<seq<N...>> { static constexpr std::string text() { return (regex<N>() + ...); } };
-template <class... N> struct regex_of<alt<N...>> {
+template <class D> struct regex_of<alpha, D> { static constexpr std::string text() { return "[A-Za-z]"; } };
+template <class D> struct regex_of<digit, D> { static constexpr std::string text() { return "[0-9]"; } };
+template <class... N, class D> struct regex_of<seq<N...>, D> { static constexpr std::string text() { return (regex<N, D>() + ...); } };
+template <class... N, class D> struct regex_of<alt<N...>, D> {
   static constexpr std::string text() {
     std::string out = "(?:";
     bool first = true;
-    ((out += (first ? "" : "|") + regex<N>(), first = false), ...);
+    ((out += (first ? "" : "|") + regex<N, D>(), first = false), ...);
     return out + ")";
   }
 };
-template <class N> struct regex_of<opt<N>> { static constexpr std::string text() { return "(?:" + regex<N>() + ")?"; } };
-template <class N> struct regex_of<many<N>> { static constexpr std::string text() { return "(?:" + regex<N>() + ")*"; } };
-template <class N> struct regex_of<many1<N>> { static constexpr std::string text() { return "(?:" + regex<N>() + ")+"; } };
-template <class N, std::size_t K> struct regex_of<repeat<N, K>> {
+template <class N, class D> struct regex_of<opt<N>, D> { static constexpr std::string text() { return "(?:" + regex<N, D>() + ")?"; } };
+template <class N, class D> struct regex_of<many<N>, D> { static constexpr std::string text() { return "(?:" + regex<N, D>() + ")*"; } };
+template <class N, class D> struct regex_of<many1<N>, D> { static constexpr std::string text() { return "(?:" + regex<N, D>() + ")+"; } };
+template <class N, std::size_t K, class D> struct regex_of<repeat<N, K>, D> {
   static constexpr std::string text() {
     std::string out;
-    for (std::size_t i = 0; i < K; ++i) out += regex<N>();
+    for (std::size_t i = 0; i < K; ++i) out += regex<N, D>();
     return out;
   }
 };
-template <> struct regex_of<rest> { static constexpr std::string text() { return ".*"; } };
-template <> struct regex_of<word_end> { static constexpr std::string text() { return "(?= |$)"; } };
-template <auto Field, class N> struct regex_of<capture<Field, N>> {
-  static constexpr std::string text() { return "(" + regex<N>() + ")"; }
+template <class D> struct regex_of<rest, D> { static constexpr std::string text() { return ".*"; } };
+template <class D> struct regex_of<word_end, D> { static constexpr std::string text() { return std::string(D::word_end); } };
+template <auto Field, class N, class D> struct regex_of<capture<Field, N>, D> {
+  static constexpr std::string text() { return "(" + regex<N, D>() + ")"; }
 };
-template <auto Flag, class N> struct regex_of<flag<Flag, N>> { static constexpr std::string text() { return regex<N>(); } };
-template <class E, class N> struct regex_of<expect<E, N>> { static constexpr std::string text() { return regex<N>(); } };
+template <auto Flag, class N, class D> struct regex_of<flag<Flag, N>, D> { static constexpr std::string text() { return regex<N, D>(); } };
+template <class E, class N, class D> struct regex_of<expect<E, N>, D> { static constexpr std::string text() { return regex<N, D>(); } };
+
+// Whether a part asks for a word's end after it.
+template <class N> struct ends_word : std::false_type {};
+template <> struct ends_word<word_end> : std::true_type {};
+template <class... N> struct ends_word<seq<N...>> : ends_word<std::tuple_element_t<sizeof...(N) - 1, std::tuple<N...>>> {};
+template <class E, class N> struct ends_word<expect<E, N>> : ends_word<N> {};
+template <auto F, class N> struct ends_word<flag<F, N>> : ends_word<N> {};
 
 // The fields a piece captures into, in the order of its groups.
 template <class N> struct captures_of { using type = std::tuple<>; };

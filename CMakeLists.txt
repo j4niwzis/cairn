@@ -9,6 +9,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 project(cairn VERSION 0.1 LANGUAGES CXX)
 
 option(CAIRN_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
+# Lines read by scan's automata too (cairn.scan): fast to run, slower to
+# build. Off, std::regex and the walk read them, with nothing but std.
+option(CAIRN_SCAN "Read lines with scan as well (cairn.scan)" ON)
 
 if(NOT COMMAND cme_find_package)
   set(CME_WITHOUT_PROVIDER ON)
@@ -28,6 +31,17 @@ cme_declare_port(NAME splice PROVIDES splice
 cme_options(splice "SPLICE_TESTS OFF")
 cme_find_package(splice REQUIRED)
 
+if(CAIRN_SCAN)
+  # scan: its fields by C++26 binding packs, so no Boost.PFR comes with it.
+  cme_declare_port(NAME scan PROVIDES scan
+    GITHUB_REPOSITORY j4niwzis/scan
+    GIT_TAG 821491520fe0d80eb772b77da86ccd9e3cdea452
+    LICENSE GPL-3.0-only
+    TARGETS scan)
+  cme_options(scan "SCAN_BUILD_TESTS OFF" "SCAN_FIELDS_BY_BINDING_PACK ON" "SCAN_INSTALL OFF")
+  cme_find_package(scan REQUIRED)
+endif()
+
 set(CAIRN_CONSTEXPR_STEPS 100000000 CACHE STRING
   "clang's -fconstexpr-steps for cairn and what imports it, as its family sets it")
 
@@ -39,6 +53,11 @@ target_compile_features(cairn PUBLIC cxx_std_26)
 target_link_libraries(cairn PUBLIC splice)
 target_compile_options(cairn PUBLIC
   $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fconstexpr-steps=${CAIRN_CONSTEXPR_STEPS}>)
+if(CAIRN_SCAN)
+  target_sources(cairn PUBLIC FILE_SET CXX_MODULES BASE_DIRS src FILES src/scan.cc)
+  target_link_libraries(cairn PUBLIC scan)
+  target_compile_definitions(cairn PUBLIC CAIRN_SCAN=1)
+endif()
 add_library(cairn::cairn ALIAS cairn)
 
 # The tests: googletest's, as a module, from cmake-everywhere, as mux's are.
