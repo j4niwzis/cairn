@@ -51,6 +51,10 @@ struct registration {
   bool answer_ctcp = true;
   std::string version = "cairn";
   std::string source = "https://github.com/j4niwzis/cairn";
+  // soju.im/bouncer-networks: the network of the bouncer this connection is
+  // for (BOUNCER BIND, before CAP END); none where empty, or where the
+  // bouncer does not offer it.
+  std::string bouncer_network;
 };
 
 namespace detail {
@@ -265,6 +269,11 @@ class client {
   template <class Out> constexpr void end_negotiation(Out& send) {
     if (negotiating_) {
       negotiating_ = false;
+      if (!how_.bouncer_network.empty() && has_cap("soju.im/bouncer-networks")) {
+        send.append("BOUNCER BIND ");
+        send.append(how_.bouncer_network);
+        send.append("\r\n");
+      }
       send.append("CAP END\r\n");
     }
   }

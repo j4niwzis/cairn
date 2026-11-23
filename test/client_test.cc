@@ -186,6 +186,13 @@ static_assert([] {
   return c.offered_value("sts") == std::optional<std::string_view>("port=6697,duration=300") && c.offered_value("batch") == std::optional<std::string_view>("") &&
          !c.offered_value("sasl");
 }());
+// A bouncer's network bound before CAP END, where the bouncer offers it.
+static_assert([] {
+  client c(registration{.nick = "b", .caps = {"soju.im/bouncer-networks"}, .bouncer_network = "42"});
+  started(c);
+  from(c, ":srv CAP * LS :soju.im/bouncer-networks");
+  return from(c, ":srv CAP * ACK :soju.im/bouncer-networks").sent == "BOUNCER BIND 42\r\nCAP END\r\n";
+}());
 }  // namespace
 
 TEST(Client, RegistersWhenRun) {
