@@ -93,18 +93,19 @@ class scram {
 
     const crypto::bytes salted =
         crypto::pbkdf2<Hash>(crypto::to_bytes(password_), *salt, iterations, Hash::size);
-    const crypto::bytes client_key = crypto::hmac<Hash>(salted, crypto::to_bytes("Client Key"));
-    const crypto::bytes stored_key = Hash::digest(client_key);
+    const auto client_key = crypto::hmac<Hash>(salted, crypto::to_bytes("Client Key"));
+    const auto stored_key = Hash::digest(client_key);
     crypto::bytes bound = crypto::to_bytes(header_);
     bound.insert(bound.end(), binding_.begin(), binding_.end());
     const std::string without_proof = "c=" + crypto::base64_encode(bound) + ",r=" + std::string(*nonce);
     const std::string auth_message = first_bare() + "," + std::string(server_first) + "," + without_proof;
-    const crypto::bytes client_signature = crypto::hmac<Hash>(stored_key, crypto::to_bytes(auth_message));
-    crypto::bytes proof = client_key;
+    const auto client_signature = crypto::hmac<Hash>(stored_key, crypto::to_bytes(auth_message));
+    auto proof = client_key;
     for (std::size_t at = 0; at < proof.size(); ++at)
       proof[at] ^= client_signature[at];
-    const crypto::bytes server_key = crypto::hmac<Hash>(salted, crypto::to_bytes("Server Key"));
+    const auto server_key = crypto::hmac<Hash>(salted, crypto::to_bytes("Server Key"));
     server_signature_ = crypto::hmac<Hash>(server_key, crypto::to_bytes(auth_message));
+    signed_ = true;
     return without_proof + ",p=" + crypto::base64_encode(proof);
   }
 
@@ -114,10 +115,10 @@ class scram {
     if (const auto error = field(fields, 'e'))
       return std::unexpected(failure{failure_code::server_error, std::string(*error)});
     const auto signature = field(fields, 'v');
-    if (!signature || server_signature_.empty())
+    if (!signature || !signed_)
       return std::unexpected(failure{failure_code::malformed, std::string(server_final)});
     const auto decoded = crypto::base64_decode(*signature);
-    if (!decoded || *decoded != server_signature_)
+    if (!decoded || !std::ranges::equal(*decoded, server_signature_))
       return std::unexpected(failure{failure_code::bad_signature, std::string(*signature)});
     return {};
   }
@@ -153,7 +154,8 @@ class scram {
   std::string password_;
   std::string nonce_;
   std::uint32_t minimum_;
-  crypto::bytes server_signature_;
+  typename Hash::digest_t server_signature_{};
+  bool signed_ = false;
 };
 
 
