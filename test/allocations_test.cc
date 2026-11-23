@@ -125,6 +125,22 @@ TEST(Allocations, NoneToReadAndWriteAMessage) {
   EXPECT_EQ(out.view(), "PRIVMSG #mux :hi there\r\n");
 }
 
+// The client fed what it only answers or passes on: nothing asked -- the
+// answer written into room, the message handed on as a view.
+TEST(Allocations, NoneForTheClientToAnswerAndPassOn) {
+  cairn::client c(cairn::registration{.nick = "me", .caps = {}});
+  room out;
+  std::size_t seen = 0;
+  const auto ping = *cairn::try_parse("PING :abc");
+  const auto said = *cairn::try_parse(":n!u@h PRIVMSG #mux :hello");
+  EXPECT_EQ(asked([&] {
+    c.feed(ping, out, [&](const cairn::event_t&) { ++seen; });
+    c.feed(said, out, [&](const cairn::event_t&) { ++seen; });
+  }), 0u);
+  EXPECT_EQ(out.view(), "PONG abc\r\n");
+  EXPECT_EQ(seen, 1u);
+}
+
 // The count sees what is asked: the owning API asks, and is counted.
 TEST(Allocations, TheOwningWayIsCounted) {
   EXPECT_GT(asked([] {

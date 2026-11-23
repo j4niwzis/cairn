@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // cairn.client -- A client's side of a connection, without the connection:
-// it is handed the lines the server sends and hands back what to send and
-// what came of them. Capability negotiation (CAP LS 302, REQ, ACK, NAK,
-// NEW, DEL), SASL (PLAIN, EXTERNAL), registration (PASS, NICK, USER, a nick
-// in use answered with the next), what the server says of itself (005),
-// PING answered, batches gathered. The transport and the control flow are
-// the caller's, as in tern.
+// handed each line the server sends (a view), it writes what to send into
+// the caller's sink and tells what came of it to the caller's callback --
+// nothing kept for either, no list made of them. Capability negotiation
+// (CAP LS 302, REQ, ACK, NAK, NEW, DEL), SASL (PLAIN, EXTERNAL),
+// registration (PASS, NICK, USER, the next nick where one is taken), 005,
+// PING answered, CTCP answered, batches gathered. The transport and the
+// control flow are the caller's, as in tern.
 export module cairn.client;
 
 import std;
@@ -32,127 +33,175 @@ struct registration {
   std::string username, realname;
   std::string password;  // PASS, for a bouncer; none where empty
   std::optional<sasl_t> sasl;
-  // What CTCP VERSION, SOURCE and CLIENTINFO are answered with; PING and TIME
-  // answered as asked. None answered where `answer_ctcp` is off.
-  bool answer_ctcp = true;
-  std::string version = "cairn";
-  std::string source = "https://github.com/j4niwzis/cairn";
   // The capabilities asked for, where the server offers them.
   std::vector<std::string> caps = {"server-time", "message-tags", "echo-message", "batch", "labeled-response",
                                    "multi-prefix", "extended-join", "away-notify", "account-notify", "account-tag",
                                    "chghost", "setname", "invite-notify", "cap-notify", "userhost-in-names",
                                    "draft/chathistory", "draft/message-redaction", "draft/read-marker",
                                    "soju.im/bouncer-networks"};
-};
-
-namespace events {
-struct registered { std::string nick; };               // 001: the nick it has
-struct caps_enabled { std::vector<std::string> caps; };  // ACK
-struct caps_offered { std::vector<std::string> caps; };  // NEW, after registration
-struct caps_withdrawn { std::vector<std::string> caps; };  // DEL
-struct logged_in { std::string account; };             // 900
-struct sasl_failed { int number = 0; std::string text; };  // 902, 904, 905, 906: registration goes on without it
-struct nick_taken { std::string tried, next; };        // 432, 433 before registration: the next tried
-// A batch gathered, at its end: its lines kept as the wire had them (they
-// outlive the lines they came in), read again with try_parse as views.
-struct batch { std::string type; std::vector<std::string> params; std::vector<std::string> lines; };
-struct received { cairn::message what; };               // anything else: views into the line fed
-struct closed { std::string text; };                    // ERROR
-}  // namespace events
-using event_t = spl::variant<events::registered, events::caps_enabled, events::caps_offered, events::caps_withdrawn,
-                             events::logged_in, events::sasl_failed, events::nick_taken, events::batch,
-                             events::received, events::closed>;
-
-// What a line came to: what to send, and what happened.
-struct reaction {
-  std::vector<line> send;
-  std::vector<event_t> events;
+  // What CTCP VERSION, SOURCE and CLIENTINFO are answered with; PING and TIME
+  // answered as asked. None answered where `answer_ctcp` is off.
+  bool answer_ctcp = true;
+  std::string version = "cairn";
+  std::string source = "https://github.com/j4niwzis/cairn";
 };
 
 namespace detail {
-constexpr std::string base64(std::string_view in) {
-  constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string out;
-  std::size_t i = 0;
-  for (; i + 2 < in.size(); i += 3) {
-    const auto n = (static_cast<unsigned char>(in[i]) << 16) | (static_cast<unsigned char>(in[i + 1]) << 8) | static_cast<unsigned char>(in[i + 2]);
-    out += alphabet[(n >> 18) & 63], out += alphabet[(n >> 12) & 63], out += alphabet[(n >> 6) & 63], out += alphabet[n & 63];
-  }
-  if (const std::size_t rest = in.size() - i; rest > 0) {
-    const auto n = (static_cast<unsigned char>(in[i]) << 16) | (rest > 1 ? static_cast<unsigned char>(in[i + 1]) << 8 : 0);
-    out += alphabet[(n >> 18) & 63], out += alphabet[(n >> 12) & 63];
-    out += rest > 1 ? alphabet[(n >> 6) & 63] : '=';
-    out += '=';
-  }
-  return out;
-}
-// The words of a capability list, as views into it: nothing made.
+// The words of a capability list, as views into it.
 constexpr auto words(std::string_view s) {
   return s | std::views::split(' ') | std::views::filter([](auto part) { return !std::ranges::empty(part); }) |
          std::views::transform([](auto part) { return std::string_view(part); });
 }
 }  // namespace detail
 
+// A capability list as the server gave it, walked as views: words between
+// spaces.
+struct cap_list {
+  std::string_view raw;
+  class iterator {
+   public:
+    using value_type = std::string_view;
+    using difference_type = std::ptrdiff_t;
+    constexpr iterator() = default;
+    constexpr explicit iterator(std::string_view rest) : rest_(rest) { next(); }
+    constexpr std::string_view operator*() const { return current_; }
+    constexpr iterator& operator++() {
+      next();
+      return *this;
+    }
+    constexpr iterator operator++(int) {
+      iterator was = *this;
+      next();
+      return was;
+    }
+    constexpr bool operator==(std::default_sentinel_t) const { return done_; }
+    constexpr bool operator==(const iterator& other) const { return done_ == other.done_ && (done_ || current_.data() == other.current_.data()); }
+
+   private:
+    constexpr void next() {
+      while (!rest_.empty() && rest_.front() == ' ') rest_.remove_prefix(1);
+      if (rest_.empty()) {
+        done_ = true;
+        return;
+      }
+      const auto space = rest_.find(' ');
+      current_ = rest_.substr(0, space);
+      rest_ = rest_.substr(space == std::string_view::npos ? rest_.size() : space);
+    }
+    std::string_view rest_, current_;
+    bool done_ = false;
+  };
+  constexpr iterator begin() const { return iterator(raw); }
+  constexpr std::default_sentinel_t end() const { return {}; }
+};
+
+// What came of a line: views into it, or into the client, valid until the
+// next line is fed.
+namespace events {
+struct registered { std::string_view nick; };              // 001: the nick it has
+struct caps_enabled { std::string_view caps; };            // ACK, the list as given
+struct caps_offered { cap_list caps; };                   // NEW, after registration
+struct caps_withdrawn { cap_list caps; };                 // DEL
+struct logged_in { std::string_view account; };            // 900
+struct sasl_failed { int number = 0; std::string_view text; };  // 902, 904, 905, 906: registration goes on without it
+struct nick_taken { std::string_view tried, next; };       // 432, 433 before registration: the next tried
+// A batch gathered, at its end: its lines kept as the wire had them (they
+// outlived the lines they came in), read again with try_parse as views.
+struct batch {
+  std::string_view type;
+  const std::vector<std::string>* params;
+  const std::vector<std::string>* lines;
+};
+struct received { cairn::message what; };                  // anything else
+struct closed { std::string_view text; };                  // ERROR
+}  // namespace events
+using event_t = spl::variant<events::registered, events::caps_enabled, events::caps_offered, events::caps_withdrawn,
+                             events::logged_in, events::sasl_failed, events::nick_taken, events::batch,
+                             events::received, events::closed>;
+
+namespace detail {
+// Base64 of the bytes a few views make together, a character at a time
+// into the sink: nothing made.
+template <class Out> struct base64_out {
+  Out& out;
+  std::size_t written = 0;
+  std::uint32_t held = 0;
+  int count = 0;
+  static constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  constexpr void put(char c) { out.push_back(c), ++written; }
+  constexpr void byte(unsigned char b) {
+    held = (held << 8) | b;
+    if (++count == 3) {
+      put(alphabet[(held >> 18) & 63]), put(alphabet[(held >> 12) & 63]), put(alphabet[(held >> 6) & 63]), put(alphabet[held & 63]);
+      held = 0, count = 0;
+    }
+  }
+  constexpr void finish() {
+    if (count == 1) held <<= 16, put(alphabet[(held >> 18) & 63]), put(alphabet[(held >> 12) & 63]), put('='), put('=');
+    if (count == 2) held <<= 8, put(alphabet[(held >> 18) & 63]), put(alphabet[(held >> 12) & 63]), put(alphabet[(held >> 6) & 63]), put('=');
+  }
+};
+}  // namespace detail
+
 class client {
  public:
   constexpr explicit client(registration how) : how_(std::move(how)) {}
 
-  // What opens the connection: CAP LS 302, PASS, NICK, USER.
-  constexpr std::vector<line> start() {
-    std::vector<line> out;
-    out.push_back(make("CAP", "LS", "302"));
-    if (!how_.password.empty()) out.push_back(make("PASS", how_.password));
+  // What opens the connection, written into `send`: CAP LS 302, PASS,
+  // NICK, USER.
+  template <class Out> constexpr void start(Out& send) {
+    send.append("CAP LS 302\r\n");
+    if (!how_.password.empty()) write(msg::pass{how_.password}, send);
     nick_ = how_.nick;
-    out.push_back(make("NICK", nick_));
-    out.push_back(make("USER", how_.username.empty() ? how_.nick : how_.username, "0", "*",
-                       how_.realname.empty() ? how_.nick : how_.realname));
-    return out;
+    write(msg::nick{nick_}, send);
+    write(msg::user{how_.username.empty() ? std::string_view(how_.nick) : std::string_view(how_.username), "0", "*",
+                    how_.realname.empty() ? std::string_view(how_.nick) : std::string_view(how_.realname)},
+          send);
   }
 
-  // A line the server sent. What it hands back points into that line's
-  // text where it can (the messages received): valid while the text is.
-  constexpr reaction feed(const line_view& l) {
-    reaction r;
+  // A line the server sent: what to send written into `send`, what came of
+  // it told to `on` (an event_t, by the overload that takes it).
+  template <class Out, class On> constexpr void feed(const line_view& l, Out& send, On&& on) {
     // Inside a batch: kept, as the wire has it, until the batch ends.
     if (const auto ref = l.tag_value("batch"); ref && !l.is("BATCH")) {
       for (auto& open : batches_)
         if (std::ranges::equal(*ref, std::string_view(open.ref))) {
-          open.gathered.lines.push_back(*try_write(l));
-          return r;
+          open.lines.push_back(*try_write(l));
+          return;
         }
     }
     if (l.is("PING")) {
-      r.send.push_back(make("PONG", l.param(0)));
+      write(msg::pong{l.param(0)}, send);
     } else if (l.is("CAP")) {
-      cap(l, r);
+      cap(l, send, on);
     } else if (l.is("AUTHENTICATE")) {
-      authenticate(l, r);
+      authenticate(l, send);
     } else if (l.is("BATCH")) {
       const std::string_view ref = l.param(0);
       if (!ref.empty() && ref.front() == '+') {
-        open_batch b{std::string(ref.substr(1)), {std::string(l.param(1)), {}, {}}};
+        open_batch b{std::string(ref.substr(1)), std::string(l.param(1)), {}, {}};
         std::size_t i = 0;
         for (std::string_view one : l.params())
-          if (i++ >= 2) b.gathered.params.emplace_back(one);
+          if (i++ >= 2) b.params.emplace_back(one);
         batches_.push_back(std::move(b));
       } else if (!ref.empty() && ref.front() == '-') {
         if (auto open = std::ranges::find(batches_, ref.substr(1), &open_batch::ref); open != batches_.end()) {
-          r.events.push_back(std::move(open->gathered));
+          ended_ = std::move(*open);
           batches_.erase(open);
+          on(event_t(events::batch{ended_.type, &ended_.params, &ended_.lines}));
         }
       }
     } else if (l.is("ERROR")) {
-      r.events.push_back(events::closed{std::string(l.param(0))});
+      on(event_t(events::closed{l.param(0)}));
     } else if (l.numeric()) {
-      numeric(l, r);
+      numeric(l, send, on);
     } else {
       if (l.is("NICK") && l.from && l.from->nick == nick_) nick_ = l.param(0);
-      const message m = read(l, server_);
+      const message m = read(l);
       if (const auto* asked = m.what.template get_if<msg::ctcp>(); asked && !asked->reply && how_.answer_ctcp && l.from)
-        if (auto answer = ctcp_answer(*asked, l.from->nick)) r.send.push_back(std::move(*answer));
-      r.events.push_back(events::received{m});
+        ctcp_answer(*asked, l.from->nick, send);
+      on(event_t(events::received{m}));
     }
-    return r;
   }
 
   constexpr const std::string& nick() const { return nick_; }
@@ -160,158 +209,158 @@ class client {
   constexpr const std::vector<std::string>& caps() const { return enabled_; }
   constexpr bool has_cap(std::string_view name) const { return std::ranges::find(enabled_, name) != enabled_.end(); }
   constexpr const isupport& server() const { return server_; }
-
- private:
-  // A CTCP request answered (as a NOTICE), where it is one answered.
-  constexpr std::optional<line> ctcp_answer(const msg::ctcp& asked, std::string_view who) const {
-    const auto reply = [&](std::string_view command, std::string_view body) {
-      std::string wrapped = "\x01";
-      (wrapped += command) += body.empty() ? "" : " ";
-      (wrapped += body) += '\x01';
-      return make("NOTICE", who, std::move(wrapped));
-    };
-    const auto is = [&](std::string_view name) { return detail::command_is(asked.command, name); };
-    if (is("VERSION")) return reply("VERSION", how_.version);
-    if (is("SOURCE")) return reply("SOURCE", how_.source);
-    if (is("PING")) return reply("PING", asked.body);
-    if (is("CLIENTINFO")) return reply("CLIENTINFO", "ACTION CLIENTINFO PING SOURCE TIME VERSION");
-    if (is("TIME")) return reply("TIME", time_text_);
-    return std::nullopt;
-  }
-
- public:
   // What CTCP TIME is answered with, the caller's clock's (none kept here).
   constexpr void set_time_text(std::string text) { time_text_ = std::move(text); }
 
  private:
-  std::string time_text_;
   struct open_batch {
-    std::string ref;
-    events::batch gathered;
+    std::string ref, type;
+    std::vector<std::string> params, lines;
   };
 
   constexpr bool wants(std::string_view cap) const {
     if (cap == "sasl") return how_.sasl.has_value();
     return std::ranges::find(how_.caps, cap) != how_.caps.end();
   }
-  constexpr void end_negotiation(reaction& r) {
+  template <class Out> constexpr void end_negotiation(Out& send) {
     if (negotiating_) {
       negotiating_ = false;
-      r.send.push_back(make("CAP", "END"));
+      send.append("CAP END\r\n");
     }
   }
-  constexpr void cap(const line_view& l, reaction& r) {
+  // CAP REQ written straight from the names wanted, as they are found.
+  template <class Out, class Names> constexpr bool ask_for(Out& send, const Names& names) {
+    bool any = false;
+    for (const std::string_view name : names) {
+      const std::string_view bare = name.substr(0, name.find('='));
+      if (!wants(bare) || has_cap(bare)) continue;
+      send.append(any ? " " : "CAP REQ :");
+      send.append(bare);
+      any = true;
+    }
+    if (any) send.append("\r\n");
+    return any;
+  }
+  template <class Out, class On> constexpr void cap(const line_view& l, Out& send, On& on) {
     const std::string_view sub = l.param(1);
     // CAP * LS * :caps (more to come), CAP * LS :caps (the last)
     const bool more = l.param(2) == "*" && !l.param(3).empty();
     std::string_view list;
     for (std::string_view one : l.params()) list = one;  // the last
     if (sub == "LS" || sub == "NEW") {
-      for (const std::string_view one : detail::words(list)) {
-        const std::string_view name = one.substr(0, one.find('='));
-        offered_.emplace_back(name);
-        if (name == "sasl" && one.find('=') != std::string_view::npos) sasl_mechanisms_ = one.substr(one.find('=') + 1);
-      }
+      for (const std::string_view one : cap_list{list}) offered_.emplace_back(one.substr(0, one.find('=')));
       if (more) return;
-      std::string ask;
-      const auto consider = [&](std::string_view name) {
-        const std::string_view bare = name.substr(0, name.find('='));
-        if (wants(bare) && !has_cap(bare)) (ask += ask.empty() ? "" : " ") += bare;
-      };
-      if (sub == "LS")
-        for (const auto& name : offered_) consider(name);
-      else
-        for (const std::string_view name : detail::words(list)) consider(name);
-      if (sub == "NEW") r.events.push_back(events::caps_offered{std::ranges::to<std::vector<std::string>>(detail::words(list))});
-      if (!ask.empty()) {
-        r.send.push_back(make("CAP", "REQ", ask));
-        ++pending_;
-      } else if (sub == "LS") {
-        end_negotiation(r);
-      }
+      const bool asked = sub == "LS" ? ask_for(send, offered_) : ask_for(send, cap_list{list});
+      if (sub == "NEW") on(event_t(events::caps_offered{cap_list{list}}));
+      if (asked) ++pending_;
+      else if (sub == "LS") end_negotiation(send);
     } else if (sub == "ACK") {
-      std::vector<std::string> now;
-      for (const std::string_view one : detail::words(list)) {
+      bool sasl = false;
+      for (const std::string_view one : cap_list{list}) {
         if (one.starts_with('-')) {
           std::erase(enabled_, one.substr(1));
         } else {
           enabled_.emplace_back(one);
-          now.emplace_back(one);
+          sasl = sasl || one == "sasl";
         }
       }
-      r.events.push_back(events::caps_enabled{now});
+      on(event_t(events::caps_enabled{list}));
       if (pending_ > 0) --pending_;
-      if (std::ranges::find(now, "sasl") != now.end() && how_.sasl && negotiating_) {
-        r.send.push_back(make("AUTHENTICATE", spl::visit(spl::overloaded{[](const sasl::plain&) { return "PLAIN"; },
-                                                                        [](const sasl::external&) { return "EXTERNAL"; }},
-                                                         *how_.sasl)));
+      if (sasl && how_.sasl && negotiating_) {
+        send.append("AUTHENTICATE ");
+        send.append(spl::visit(spl::overloaded{[](const sasl::plain&) { return std::string_view("PLAIN"); },
+                                               [](const sasl::external&) { return std::string_view("EXTERNAL"); }},
+                               *how_.sasl));
+        send.append("\r\n");
         authenticating_ = true;
       } else if (pending_ == 0 && !authenticating_) {
-        end_negotiation(r);
+        end_negotiation(send);
       }
     } else if (sub == "NAK") {
       if (pending_ > 0) --pending_;
-      if (pending_ == 0 && !authenticating_) end_negotiation(r);
+      if (pending_ == 0 && !authenticating_) end_negotiation(send);
     } else if (sub == "DEL") {
-      for (const std::string_view one : detail::words(list)) std::erase(enabled_, one);
-      r.events.push_back(events::caps_withdrawn{std::ranges::to<std::vector<std::string>>(detail::words(list))});
+      for (const std::string_view one : cap_list{list}) std::erase(enabled_, one);
+      on(event_t(events::caps_withdrawn{cap_list{list}}));
     }
   }
-  constexpr void authenticate(const line_view& l, reaction& r) {
+  template <class Out> constexpr void authenticate(const line_view& l, Out& send) {
     if (l.param(0) != "+" || !how_.sasl) return;
     spl::visit(spl::overloaded{
                    // The identity the connection proved: nothing to say.
-                   [&](const sasl::external&) { r.send.push_back(make("AUTHENTICATE", "+")); },
+                   [&](const sasl::external&) { send.append("AUTHENTICATE +\r\n"); },
+                   // \0login\0login\0password, base64, in pieces of 400 (one of
+                   // exactly 400 followed by "+") -- written as it is made.
                    [&](const sasl::plain& plain) {
-                     std::string payload;
-                     payload += plain.login, payload += '\0', payload += plain.login, payload += '\0', payload += plain.password;
-                     const std::string encoded = detail::base64(payload);
-                     // In pieces of 400; one of exactly 400 followed by "+".
-                     for (std::size_t at = 0; at < encoded.size(); at += 400)
-                       r.send.push_back(make("AUTHENTICATE", encoded.substr(at, 400)));
-                     if (encoded.empty() || encoded.size() % 400 == 0) r.send.push_back(make("AUTHENTICATE", "+"));
+                     struct chunked {
+                       Out& out;
+                       std::size_t in_line = 0;
+                       constexpr void push_back(char c) {
+                         if (in_line == 0) out.append("AUTHENTICATE ");
+                         out.push_back(c);
+                         if (++in_line == 400) out.append("\r\n"), in_line = 0;
+                       }
+                     } lines{send};
+                     detail::base64_out<chunked> b64{lines};
+                     const auto bytes = [&](std::string_view s) {
+                       for (char c : s) b64.byte(static_cast<unsigned char>(c));
+                     };
+                     bytes(plain.login), b64.byte(0), bytes(plain.login), b64.byte(0), bytes(plain.password);
+                     b64.finish();
+                     if (lines.in_line > 0) send.append("\r\n");
+                     else send.append("AUTHENTICATE +\r\n");
                    }},
                *how_.sasl);
   }
-  constexpr void numeric(const line_view& l, reaction& r) {
+  template <class Out, class On> constexpr void numeric(const line_view& l, Out& send, On& on) {
     const int n = l.number();
     if (n == 1) {
       registered_ = true;
       nick_ = l.param(0);
-      r.events.push_back(events::registered{nick_});
+      on(event_t(events::registered{nick_}));
     } else if (n == 5) {
       server_.take(l);
     } else if ((n == 432 || n == 433) && !registered_) {
-      const std::string tried = nick_;
+      tried_ = nick_;
       nick_ = next_nick_ < how_.other_nicks.size() ? how_.other_nicks[next_nick_++] : nick_ + "_";
-      r.send.push_back(make("NICK", nick_));
-      r.events.push_back(events::nick_taken{tried, nick_});
+      write(msg::nick{nick_}, send);
+      on(event_t(events::nick_taken{tried_, nick_}));
       return;
     } else if (n == 900) {
-      r.events.push_back(events::logged_in{std::string(l.param(2))});
+      on(event_t(events::logged_in{l.param(2)}));
     } else if (n == 903 || n == 907) {
       authenticating_ = false;
-      if (pending_ == 0) end_negotiation(r);
+      if (pending_ == 0) end_negotiation(send);
     } else if (n == 902 || n == 904 || n == 905 || n == 906) {
       authenticating_ = false;
       std::string_view last;
       for (std::string_view one : l.params()) last = one;
-      r.events.push_back(events::sasl_failed{n, std::string(last)});
-      if (pending_ == 0) end_negotiation(r);
+      on(event_t(events::sasl_failed{n, last}));
+      if (pending_ == 0) end_negotiation(send);
       return;
     }
-    r.events.push_back(events::received{read(l, server_)});
+    on(event_t(events::received{read(l)}));
+  }
+  // A CTCP request answered with a NOTICE, written straight into `send`.
+  template <class Out> constexpr void ctcp_answer(const msg::ctcp& asked, std::string_view who, Out& send) const {
+    const auto reply = [&](std::string_view command, std::string_view body) { write(msg::ctcp{who, command, body, true}, send); };
+    const auto is = [&](std::string_view name) { return detail::command_is(asked.command, name); };
+    if (is("VERSION")) reply("VERSION", how_.version);
+    else if (is("SOURCE")) reply("SOURCE", how_.source);
+    else if (is("PING")) reply("PING", asked.body);
+    else if (is("CLIENTINFO")) reply("CLIENTINFO", "ACTION CLIENTINFO PING SOURCE TIME VERSION");
+    else if (is("TIME")) reply("TIME", time_text_);
   }
 
   registration how_;
-  std::string nick_;
+  std::string nick_, tried_, time_text_;
   std::size_t next_nick_ = 0;
   std::vector<std::string> offered_, enabled_;
-  std::string sasl_mechanisms_;
   int pending_ = 0;
   bool negotiating_ = true, authenticating_ = false, registered_ = false;
   isupport server_;
   std::vector<open_batch> batches_;
+  open_batch ended_;
 };
 
 }  // namespace cairn

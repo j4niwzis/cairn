@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// cairn::client over scripted conversations: what it sends, what it says
-// happened. Checked while compiling, and run.
+// cairn::client over scripted conversations: what it writes into the sink,
+// what it tells the callback. Checked while compiling, and run.
 import std;
 import splice;
 import cairn;
@@ -11,13 +11,22 @@ import gtest;
 namespace {
 using namespace cairn;
 
-constexpr std::vector<std::string> sent(const std::vector<line>& lines) {
-  std::vector<std::string> out;
-  for (const auto& one : lines) out.push_back(*try_write(one));
+// What a line came to, collected by the test (the test may keep things).
+struct came {
+  std::string sent;
+  std::vector<event_t> events;
+};
+constexpr came from(client& c, std::string_view text) {
+  came out;
+  c.feed(*try_parse(text), out.sent, [&](const event_t& e) { out.events.push_back(e); });
   return out;
 }
-constexpr reaction from(client& c, std::string_view text) { return c.feed(*try_parse(text)); }
-template <class E> constexpr bool happened(const reaction& r) {
+constexpr std::string started(client& c) {
+  std::string out;
+  c.start(out);
+  return out;
+}
+template <class E> constexpr bool happened(const came& r) {
   return std::ranges::any_of(r.events, [](const event_t& e) { return spl::holds_alternative<E>(e); });
 }
 
@@ -25,19 +34,16 @@ template <class E> constexpr bool happened(const reaction& r) {
 static_assert([] {
   client c(registration{.nick = "alice", .other_nicks = {"alice2"}, .username = "al", .realname = "Alice A",
                         .sasl = sasl::plain{"alice", "secret"}, .caps = {"server-time", "batch"}});
-  if (sent(c.start()) != std::vector<std::string>{"CAP LS 302\r\n", "NICK alice\r\n", "USER al 0 * :Alice A\r\n"}) return false;
-  // The capabilities in two lines; asked for what it wants and the server has.
-  if (!from(c, ":srv CAP * LS * :multi-prefix sasl=PLAIN,EXTERNAL").send.empty()) return false;
-  if (sent(from(c, ":srv CAP * LS :server-time batch draft/foo").send) != std::vector<std::string>{"CAP REQ :sasl server-time batch\r\n"}) return false;
+  if (started(c) != "CAP LS 302\r\nNICK alice\r\nUSER al 0 * :Alice A\r\n") return false;
+  if (!from(c, ":srv CAP * LS * :multi-prefix sasl=PLAIN,EXTERNAL").sent.empty()) return false;
+  if (from(c, ":srv CAP * LS :server-time batch draft/foo").sent != "CAP REQ :sasl server-time batch\r\n") return false;
   const auto ack = from(c, ":srv CAP * ACK :sasl server-time batch");
-  if (!happened<events::caps_enabled>(ack) || sent(ack.send) != std::vector<std::string>{"AUTHENTICATE PLAIN\r\n"}) return false;
-  // \0alice\0alice\0secret, base64.
-  if (sent(from(c, "AUTHENTICATE +").send) != std::vector<std::string>{"AUTHENTICATE YWxpY2UAYWxpY2UAc2VjcmV0\r\n"}) return false;
+  if (!happened<events::caps_enabled>(ack) || ack.sent != "AUTHENTICATE PLAIN\r\n") return false;
+  if (from(c, "AUTHENTICATE +").sent != "AUTHENTICATE YWxpY2UAYWxpY2UAc2VjcmV0\r\n") return false;  // \0alice\0alice\0secret
   if (!happened<events::logged_in>(from(c, ":srv 900 alice alice!al@h alice :You are now logged in as alice"))) return false;
-  if (sent(from(c, ":srv 903 alice :SASL authentication successful").send) != std::vector<std::string>{"CAP END\r\n"}) return false;
-  // The nick taken: the next.
+  if (from(c, ":srv 903 alice :SASL authentication successful").sent != "CAP END\r\n") return false;
   const auto taken = from(c, ":srv 433 * alice :Nickname is already in use");
-  if (!happened<events::nick_taken>(taken) || sent(taken.send) != std::vector<std::string>{"NICK alice2\r\n"}) return false;
+  if (!happened<events::nick_taken>(taken) || taken.sent != "NICK alice2\r\n") return false;
   if (!happened<events::registered>(from(c, ":srv 001 alice2 :Welcome")) || c.nick() != "alice2" || !c.registered()) return false;
   from(c, ":srv 005 alice2 CASEMAPPING=ascii NETWORK=Example :are supported");
   return c.server().network == "Example" && c.has_cap("batch") && c.has_cap("sasl");
@@ -46,67 +52,75 @@ static_assert([] {
 // No capability it wants: CAP END at once. PING answered.
 static_assert([] {
   client c(registration{.nick = "bob", .caps = {"server-time"}});
-  c.start();
-  if (sent(from(c, ":srv CAP * LS :multi-prefix").send) != std::vector<std::string>{"CAP END\r\n"}) return false;
-  return sent(from(c, "PING :token123").send) == std::vector<std::string>{"PONG token123\r\n"};
+  started(c);
+  if (from(c, ":srv CAP * LS :multi-prefix").sent != "CAP END\r\n") return false;
+  return from(c, "PING :token123").sent == "PONG token123\r\n";
 }());
 
 // SASL failing: registration goes on without it.
 static_assert([] {
   client c(registration{.nick = "carol", .sasl = sasl::plain{"carol", "wrong"}, .caps = {}});
-  c.start();
+  started(c);
   from(c, ":srv CAP * LS :sasl");
   from(c, ":srv CAP * ACK :sasl");
   from(c, "AUTHENTICATE +");
   const auto failed = from(c, ":srv 904 carol :SASL authentication failed");
-  return happened<events::sasl_failed>(failed) && sent(failed.send) == std::vector<std::string>{"CAP END\r\n"};
+  return happened<events::sasl_failed>(failed) && failed.sent == "CAP END\r\n";
 }());
 
-// A batch gathered: its messages handed out together at its end.
+// A batch gathered: its lines handed out together at its end.
 static_assert([] {
   client c(registration{.nick = "dave", .caps = {}});
-  c.start();
+  started(c);
   if (!from(c, ":srv BATCH +b1 chathistory #mux").events.empty()) return false;
   if (!from(c, "@batch=b1 :x!x@h PRIVMSG #mux :one").events.empty()) return false;
   if (!from(c, "@batch=b1 :y!y@h PRIVMSG #mux :two").events.empty()) return false;
   const auto done = from(c, ":srv BATCH -b1");
   if (done.events.size() != 1 || !spl::holds_alternative<events::batch>(done.events[0])) return false;
   const auto& b = spl::get<events::batch>(done.events[0]);
-  return b.type == "chathistory" && b.params == std::vector<std::string>{"#mux"} && b.lines.size() == 2 &&
-         try_parse(b.lines[1])->param(1) == "two";
+  return b.type == "chathistory" && *b.params == std::vector<std::string>{"#mux"} && b.lines->size() == 2 &&
+         try_parse((*b.lines)[1])->param(1) == "two";
 }());
 
 // Capabilities offered and withdrawn after registration (cap-notify).
 static_assert([] {
   client c(registration{.nick = "erin", .caps = {"away-notify"}});
-  c.start();
+  started(c);
   from(c, ":srv CAP * LS :cap-notify");
   from(c, ":srv 001 erin :Welcome");
   const auto offered = from(c, ":srv CAP erin NEW :away-notify");
-  if (!happened<events::caps_offered>(offered) || sent(offered.send) != std::vector<std::string>{"CAP REQ away-notify\r\n"}) return false;
+  if (!happened<events::caps_offered>(offered) || offered.sent != "CAP REQ :away-notify\r\n") return false;
   from(c, ":srv CAP erin ACK :away-notify");
   if (!c.has_cap("away-notify")) return false;
   return happened<events::caps_withdrawn>(from(c, ":srv CAP erin DEL :away-notify")) && !c.has_cap("away-notify");
+}());
+
+// CTCP asked: answered as a NOTICE, as said; not where it is turned off.
+static_assert([] {
+  client c(registration{.nick = "gina", .caps = {}, .version = "mux 1.0"});
+  started(c);
+  if (from(c, ":hal!h@h PRIVMSG gina :\x01VERSION\x01").sent != "NOTICE hal :\x01VERSION mux 1.0\x01\r\n") return false;
+  if (from(c, ":hal!h@h PRIVMSG gina :\x01PING 12345\x01").sent != "NOTICE hal :\x01PING 12345\x01\r\n") return false;
+  client quiet(registration{.nick = "q", .answer_ctcp = false});
+  started(quiet);
+  return from(quiet, ":hal!h@h PRIVMSG q :\x01VERSION\x01").sent.empty();
+}());
+
+// A long SASL payload: in pieces of 400, an exact 400 followed by "+".
+static_assert([] {
+  client c(registration{.nick = "h", .sasl = sasl::plain{"h", std::string(296, 'p')}, .caps = {}});
+  started(c);
+  from(c, ":srv CAP * LS :sasl");
+  from(c, ":srv CAP * ACK :sasl");
+  const std::string sent = from(c, "AUTHENTICATE +").sent;  // 1+1+1+1+296 = 300 bytes: 400 base64 characters
+  return sent.size() == 13 + 400 + 2 + 16 && sent.ends_with("AUTHENTICATE +\r\n");
 }());
 }  // namespace
 
 TEST(Client, RegistersWhenRun) {
   client c(registration{.nick = "frank", .caps = {}});
-  EXPECT_EQ(c.start().size(), 3u);
+  EXPECT_EQ(started(c), "CAP LS 302\r\nNICK frank\r\nUSER frank 0 * frank\r\n");
   from(c, ":srv CAP * LS :");
   from(c, ":srv 001 frank :Welcome");
   EXPECT_TRUE(c.registered());
 }
-
-namespace {
-// CTCP asked: answered as a NOTICE, as said; not where it is turned off.
-static_assert([] {
-  client c(registration{.nick = "gina", .caps = {}, .version = "mux 1.0"});
-  c.start();
-  if (sent(from(c, ":hal!h@h PRIVMSG gina :\x01VERSION\x01").send) != std::vector<std::string>{"NOTICE hal :\x01VERSION mux 1.0\x01\r\n"}) return false;
-  if (sent(from(c, ":hal!h@h PRIVMSG gina :\x01PING 12345\x01").send) != std::vector<std::string>{"NOTICE hal :\x01PING 12345\x01\r\n"}) return false;
-  client quiet(registration{.nick = "q", .answer_ctcp = false});
-  quiet.start();
-  return from(quiet, ":hal!h@h PRIVMSG q :\x01VERSION\x01").send.empty();
-}());
-}  // namespace
