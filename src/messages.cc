@@ -109,15 +109,14 @@ constexpr std::vector<msg::mode_change> parse_modes(const std::vector<std::strin
 }
 
 constexpr message read(line l, const isupport& server = {}) {
-  const auto& c = l.command;
   const auto p = [&](std::size_t i) { return std::string(l.param(i)); };
   message_t what = msg::unknown{};
   if (l.numeric()) {
     msg::reply r{l.number(), p(0), {}};
     if (l.params.size() > 1) r.params.assign(l.params.begin() + 1, l.params.end());
     what = std::move(r);
-  } else if (c == "PRIVMSG" || c == "NOTICE") {
-    const bool notice = c == "NOTICE";
+  } else if (l.is("PRIVMSG") || l.is("NOTICE")) {
+    const bool notice = l.is("NOTICE");
     if (auto ct = detail::ctcp_of(l.param(1))) {
       if (ct->first == "ACTION" && !notice) what = msg::action{p(0), ct->second};
       else what = msg::ctcp{p(0), ct->first, ct->second, notice};
@@ -126,47 +125,47 @@ constexpr message read(line l, const isupport& server = {}) {
     } else {
       what = msg::privmsg{p(0), p(1)};
     }
-  } else if (c == "TAGMSG") {
+  } else if (l.is("TAGMSG")) {
     what = msg::tagmsg{p(0)};
-  } else if (c == "JOIN") {
+  } else if (l.is("JOIN")) {
     what = msg::join{detail::split_commas(l.param(0)), detail::split_commas(l.param(1)),
                      l.params.size() >= 3 ? p(1) : std::string(), l.params.size() >= 3 ? p(2) : std::string()};
     if (l.params.size() >= 3) std::get<msg::join>(what).keys.clear();  // extended-join: account and realname, not keys
-  } else if (c == "PART") {
+  } else if (l.is("PART")) {
     what = msg::part{detail::split_commas(l.param(0)), p(1)};
-  } else if (c == "QUIT") {
+  } else if (l.is("QUIT")) {
     what = msg::quit{p(0)};
-  } else if (c == "KICK") {
+  } else if (l.is("KICK")) {
     what = msg::kick{p(0), p(1), p(2)};
-  } else if (c == "NICK") {
+  } else if (l.is("NICK")) {
     what = msg::nick{p(0)};
-  } else if (c == "TOPIC") {
+  } else if (l.is("TOPIC")) {
     what = msg::topic{p(0), l.params.size() > 1 ? std::optional<std::string>(p(1)) : std::nullopt};
-  } else if (c == "INVITE") {
+  } else if (l.is("INVITE")) {
     what = msg::invite{p(0), p(1)};
-  } else if (c == "MODE") {
+  } else if (l.is("MODE")) {
     what = msg::mode{p(0), parse_modes(l.params, 1, server, server.is_channel(l.param(0)))};
-  } else if (c == "AWAY") {
+  } else if (l.is("AWAY")) {
     what = msg::away{l.params.empty() ? std::nullopt : std::optional<std::string>(p(0))};
-  } else if (c == "ACCOUNT") {
+  } else if (l.is("ACCOUNT")) {
     what = msg::account{p(0)};
-  } else if (c == "CHGHOST") {
+  } else if (l.is("CHGHOST")) {
     what = msg::chghost{p(0), p(1)};
-  } else if (c == "SETNAME") {
+  } else if (l.is("SETNAME")) {
     what = msg::setname{p(0)};
-  } else if (c == "PING") {
+  } else if (l.is("PING")) {
     what = msg::ping{p(0)};
-  } else if (c == "PONG") {
+  } else if (l.is("PONG")) {
     what = msg::pong{l.params.empty() ? std::string() : l.params.back()};
-  } else if (c == "ERROR") {
+  } else if (l.is("ERROR")) {
     what = msg::error{p(0)};
-  } else if (c == "CAP") {
+  } else if (l.is("CAP")) {
     msg::cap cp{p(1), {}};
     if (l.params.size() > 2) cp.params.assign(l.params.begin() + 2, l.params.end());
     what = std::move(cp);
-  } else if (c == "AUTHENTICATE") {
+  } else if (l.is("AUTHENTICATE")) {
     what = msg::authenticate{p(0)};
-  } else if (c == "BATCH") {
+  } else if (l.is("BATCH")) {
     const std::string_view ref = l.param(0);
     msg::batch b{!ref.empty() && ref.front() == '+', std::string(ref.empty() ? ref : ref.substr(1)), p(1), {}};
     if (l.params.size() > 2) b.params.assign(l.params.begin() + 2, l.params.end());
@@ -174,6 +173,8 @@ constexpr message read(line l, const isupport& server = {}) {
   }
   return {std::move(what), std::move(l)};
 }
+// From a view: made a line of its own first.
+constexpr message read(const line_view& l, const isupport& server = {}) { return read(to_owned(l), server); }
 
 // A message as a line to send. Only what a client sends: a reply, an
 // unknown, a batch's end and the like are lines of their own (make()).

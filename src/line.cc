@@ -50,48 +50,10 @@ constexpr std::string_view describe(const line_error& e) {
 inline constexpr std::size_t max_tags_bytes = 8191;
 inline constexpr std::size_t max_body_bytes = 512;
 
-// One message tag: its key -- '+' first for a client's own, a vendor's
-// prefix as it came -- and its value, unescaped (none and empty are one).
-struct tag {
-  std::string key;
-  std::string value;
-  constexpr bool client_only() const { return !key.empty() && key.front() == '+'; }
-  friend constexpr bool operator==(const tag&, const tag&) = default;
-};
-
-// Who a line is from: a server's name, or a nick with its user and host
-// where they are given (nick!user@host).
-struct source {
-  std::string nick;  // or the server's name
-  std::string user;
-  std::string host;
-  constexpr bool empty() const { return nick.empty() && user.empty() && host.empty(); }
-  friend constexpr bool operator==(const source&, const source&) = default;
-};
-
-struct line {
-  std::vector<tag> tags;
-  std::optional<cairn::source> from;
-  std::string command;  // upper-cased as it came; a numeric as its three digits
-  std::vector<std::string> params;
-
-  constexpr const std::string* tag_value(std::string_view key) const {
-    for (const tag& one : tags)
-      if (one.key == key) return &one.value;
-    return nullptr;
-  }
-  constexpr bool has_tag(std::string_view key) const { return tag_value(key) != nullptr; }
-  constexpr bool numeric() const {
-    return command.size() == 3 && std::ranges::all_of(command, [](char c) { return c >= '0' && c <= '9'; });
-  }
-  constexpr int number() const {
-    return numeric() ? (command[0] - '0') * 100 + (command[1] - '0') * 10 + (command[2] - '0') : 0;
-  }
-  // The parameter at `i`, or nothing past the end.
-  constexpr std::string_view param(std::size_t i) const {
-    return i < params.size() ? std::string_view(params[i]) : std::string_view();
-  }
-  friend constexpr bool operator==(const line&, const line&) = default;
+// Reading or writing that came to an error, thrown: the error, as it was.
+struct line_failure : std::runtime_error {
+  line_error error;
+  explicit line_failure(line_error e) : std::runtime_error(std::string(describe(e))), error(std::move(e)) {}
 };
 
 // A tag's value as the wire carries it, and back (IRCv3 message-tags), as
@@ -169,22 +131,80 @@ class unescaped_view : public std::ranges::view_interface<unescaped_view> {
 };
 constexpr unescaped_view unescaped(std::string_view in) { return unescaped_view(in); }
 
-// nick!user@host, or a server's name.
-constexpr source parse_source(std::string_view in) {
-  source out;
-  const auto at = in.find('@');
-  const std::string_view before = in.substr(0, at);
-  if (at != std::string_view::npos) out.host = std::string(in.substr(at + 1));
-  const auto bang = before.find('!');
-  out.nick = std::string(before.substr(0, bang));
-  if (bang != std::string_view::npos) out.user = std::string(before.substr(bang + 1));
-  return out;
-}
-constexpr void write_source(const source& s, std::string& out) {
-  out += s.nick;
-  if (!s.user.empty()) (out += '!') += s.user;
-  if (!s.host.empty()) (out += '@') += s.host;
-}
+namespace detail {
+constexpr char upper(char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c; }
+}  // namespace detail
+
+// One message tag: its key -- '+' first for a client's own, a vendor's
+// prefix as it came -- and its text. A line_view keeps the text as the wire
+// has it, escaped, and unescapes it as it is read (value()); a line keeps it
+// unescaped.
+template <class S> struct basic_tag {
+  S key;
+  S text;
+  constexpr bool client_only() const { return !key.empty() && key.front() == '+'; }
+  // Its value, unescaped: a view either way.
+  constexpr auto value() const {
+    if constexpr (std::same_as<S, std::string_view>)
+      return unescaped(text);
+    else
+      return std::string_view(text);
+  }
+  friend constexpr bool operator==(const basic_tag&, const basic_tag&) = default;
+};
+
+// Who a line is from: a server's name, or a nick with its user and host
+// where they are given (nick!user@host).
+template <class S> struct basic_source {
+  S nick;  // or the server's name
+  S user;
+  S host;
+  constexpr bool empty() const { return nick.empty() && user.empty() && host.empty(); }
+  friend constexpr bool operator==(const basic_source&, const basic_source&) = default;
+};
+
+// A line: owning (S = std::string, `line`) or a view into what was read
+// (S = std::string_view, `line_view`), valid while that is.
+template <class S> struct basic_line {
+  std::vector<basic_tag<S>> tags;
+  std::optional<basic_source<S>> from;
+  S command;  // as it came; is() compares without case
+  std::vector<S> params;
+
+  constexpr const basic_tag<S>* tag(std::string_view key) const {
+    for (const auto& one : tags)
+      if (one.key == key) return &one;
+    return nullptr;
+  }
+  constexpr bool has_tag(std::string_view key) const { return tag(key) != nullptr; }
+  // A tag's value, unescaped, as a string of its own -- or none.
+  constexpr std::optional<std::string> tag_value(std::string_view key) const {
+    const auto* one = tag(key);
+    if (!one) return std::nullopt;
+    return std::ranges::to<std::string>(one->value());
+  }
+  constexpr bool is(std::string_view name) const {
+    return command.size() == name.size() &&
+           std::ranges::equal(command, name, [](char a, char b) { return detail::upper(a) == detail::upper(b); });
+  }
+  constexpr bool numeric() const {
+    return command.size() == 3 && std::ranges::all_of(command, [](char c) { return c >= '0' && c <= '9'; });
+  }
+  constexpr int number() const {
+    return numeric() ? (command[0] - '0') * 100 + (command[1] - '0') * 10 + (command[2] - '0') : 0;
+  }
+  constexpr std::string_view param(std::size_t i) const {
+    return i < params.size() ? std::string_view(params[i]) : std::string_view();
+  }
+  friend constexpr bool operator==(const basic_line&, const basic_line&) = default;
+};
+
+using tag = basic_tag<std::string>;
+using source = basic_source<std::string>;
+using line = basic_line<std::string>;
+using tag_view = basic_tag<std::string_view>;
+using source_view = basic_source<std::string_view>;
+using line_view = basic_line<std::string_view>;
 
 namespace detail {
 constexpr bool is_space(char c) { return c == ' '; }
@@ -203,35 +223,42 @@ constexpr bool command_ok(std::string_view c) {
   if (std::ranges::all_of(c, [](char x) { return x >= '0' && x <= '9'; })) return c.size() == 3;
   return std::ranges::all_of(c, [](char x) { return (x >= 'A' && x <= 'Z') || (x >= 'a' && x <= 'z'); });
 }
-constexpr char upper(char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c; }
 }  // namespace detail
 
-// A line, without its CR LF (a trailing CR or LF is taken off). Tags and
-// source optional; any number of spaces between parts; the last parameter
-// after ':' keeps its spaces.
-constexpr std::expected<line, line_error> parse(std::string_view in) {
+// nick!user@host, or a server's name: views into it.
+constexpr source_view parse_source(std::string_view in) {
+  source_view out;
+  const auto at = in.find('@');
+  const std::string_view before = in.substr(0, at);
+  if (at != std::string_view::npos) out.host = in.substr(at + 1);
+  const auto bang = before.find('!');
+  out.nick = before.substr(0, bang);
+  if (bang != std::string_view::npos) out.user = before.substr(bang + 1);
+  return out;
+}
+
+// A line, as views into what is given -- without its CR LF (a trailing CR
+// or LF is taken off). Tags and source optional; any number of spaces
+// between parts; the last parameter after ':' keeps its spaces.
+constexpr std::expected<line_view, line_error> try_parse(std::string_view in) {
   while (!in.empty() && (in.back() == '\n' || in.back() == '\r')) in.remove_suffix(1);
-  line out;
+  line_view out;
   in = detail::skip_spaces(in);
   if (in.empty()) return std::unexpected(errors::empty{});
   if (in.front() == '@') {
     in.remove_prefix(1);
     const std::string_view all = detail::take_word(in);
     if (all.empty()) return std::unexpected(errors::bad_tags{});
-    std::size_t from = 0;
-    while (from <= all.size()) {
-      const auto end = std::min(all.find(';', from), all.size());
-      const std::string_view one = all.substr(from, end - from);
-      if (!one.empty()) {
-        const auto eq = one.find('=');
-        tag t{std::string(one.substr(0, eq)), eq == std::string_view::npos ? std::string() : std::ranges::to<std::string>(unescaped(one.substr(eq + 1)))};
-        // A key given twice: the last one counts.
-        if (auto same = std::ranges::find(out.tags, t.key, &tag::key); same != out.tags.end())
-          *same = std::move(t);
-        else
-          out.tags.push_back(std::move(t));
-      }
-      from = end + 1;
+    for (auto part : all | std::views::split(';')) {
+      const std::string_view one(part);
+      if (one.empty()) continue;
+      const auto eq = one.find('=');
+      tag_view t{one.substr(0, eq), eq == std::string_view::npos ? std::string_view() : one.substr(eq + 1)};
+      // A key given twice: the last one counts.
+      if (auto same = std::ranges::find(out.tags, t.key, &tag_view::key); same != out.tags.end())
+        *same = t;
+      else
+        out.tags.push_back(t);
     }
     in = detail::skip_spaces(in);
   }
@@ -245,24 +272,116 @@ constexpr std::expected<line, line_error> parse(std::string_view in) {
   const std::string_view command = detail::take_word(in);
   if (command.empty()) return std::unexpected(errors::empty{});
   if (!detail::command_ok(command)) return std::unexpected(errors::bad_command{std::string(command)});
-  out.command.reserve(command.size());
-  for (char c : command) out.command += detail::upper(c);
+  out.command = command;
   for (;;) {
     in = detail::skip_spaces(in);
     if (in.empty()) break;
     if (in.front() == ':') {
-      out.params.emplace_back(in.substr(1));
+      out.params.push_back(in.substr(1));
       break;
     }
-    out.params.emplace_back(detail::take_word(in));
+    out.params.push_back(detail::take_word(in));
   }
   return out;
 }
+constexpr line_view parse(std::string_view in) {
+  auto got = try_parse(in);
+  if (!got) throw line_failure(std::move(got.error()));
+  return *std::move(got);
+}
 
-// A line as the wire takes it, CR LF ended -- or why it cannot be: the
-// limits held before anything is written, the last parameter written after
-// ':' where it has to be (empty, a space in it, or ':' first).
-constexpr std::expected<void, line_error> write(const line& l, std::string& out) {
+// A line of its own, from a view: values unescaped, command upper-cased.
+constexpr line to_owned(const line_view& v) {
+  line out;
+  out.tags.reserve(v.tags.size());
+  for (const tag_view& t : v.tags) out.tags.push_back({std::string(t.key), std::ranges::to<std::string>(t.value())});
+  if (v.from) out.from = source{std::string(v.from->nick), std::string(v.from->user), std::string(v.from->host)};
+  out.command = std::ranges::to<std::string>(v.command | std::views::transform(detail::upper));
+  out.params.reserve(v.params.size());
+  for (std::string_view p : v.params) out.params.emplace_back(p);
+  return out;
+}
+constexpr const line& to_owned(const line& l) { return l; }
+
+// One line from an input range of characters, up to and with its LF: the
+// iterator left after it, for the next. A line of its own -- the range need
+// not keep what it gave. At the end of the input with nothing read: empty.
+template <std::input_iterator I, std::sentinel_for<I> E>
+  requires std::convertible_to<std::iter_reference_t<I>, char>
+constexpr std::expected<line, line_error> try_read(I& at, E end) {
+  std::string text;
+  while (at != end) {
+    const char c = *at;
+    ++at;
+    if (c == '\n') break;
+    text += c;
+  }
+  auto got = try_parse(text);
+  if (!got) return std::unexpected(std::move(got.error()));
+  return to_owned(*got);
+}
+template <std::input_iterator I, std::sentinel_for<I> E>
+  requires std::convertible_to<std::iter_reference_t<I>, char>
+constexpr line read(I& at, E end) {
+  auto got = try_read(at, end);
+  if (!got) throw line_failure(std::move(got.error()));
+  return *std::move(got);
+}
+
+// The lines of an input range, one at a time as they are walked: each a
+// line, or why it is none. Blank lines between are passed over.
+template <std::ranges::input_range R>
+  requires std::ranges::view<R>
+class lines_view : public std::ranges::view_interface<lines_view<R>> {
+ public:
+  constexpr lines_view() = default;
+  constexpr explicit lines_view(R input) : input_(std::move(input)) {}
+  class iterator {
+   public:
+    using value_type = std::expected<line, line_error>;
+    using difference_type = std::ptrdiff_t;
+    constexpr iterator() = default;
+    constexpr explicit iterator(lines_view* of) : of_(of), at_(std::ranges::begin(of->input_)) { next(); }
+    constexpr const value_type& operator*() const { return current_; }
+    constexpr iterator& operator++() {
+      next();
+      return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+    constexpr bool operator==(std::default_sentinel_t) const { return done_; }
+
+   private:
+    constexpr void next() {
+      for (;;) {
+        if (at_ == std::ranges::end(of_->input_)) {
+          done_ = true;
+          return;
+        }
+        current_ = try_read(at_, std::ranges::end(of_->input_));
+        if (current_ || !std::holds_alternative<errors::empty>(current_.error())) return;
+      }
+    }
+    lines_view* of_ = nullptr;
+    std::ranges::iterator_t<R> at_{};
+    value_type current_{std::unexpect, errors::empty{}};
+    bool done_ = false;
+  };
+  constexpr iterator begin() { return iterator(this); }
+  constexpr std::default_sentinel_t end() const { return {}; }
+
+ private:
+  R input_;
+};
+template <std::ranges::viewable_range R>
+constexpr auto lines(R&& r) { return lines_view<std::views::all_t<R>>(std::views::all(std::forward<R>(r))); }
+
+// A line as the wire takes it, CR LF ended, appended to `out` -- or why it
+// cannot be, `out` then as it was: the limits held before anything is
+// written, the last parameter after ':' where it has to be (empty, a space
+// in it, or ':' first). A line_view's tag values go as they came, escaped;
+// a line's are escaped as they are written.
+template <class S>
+constexpr std::expected<void, line_error> try_write(const basic_line<S>& l, std::string& out) {
   const std::size_t began = out.size();
   const auto fail = [&](line_error e) -> std::unexpected<line_error> {
     out.resize(began);
@@ -274,15 +393,20 @@ constexpr std::expected<void, line_error> write(const line& l, std::string& out)
   if (!l.tags.empty()) {
     out += '@';
     bool first = true;
-    for (const tag& t : l.tags) {
-      if (t.key.empty() || !clean(t.key) || t.key.find_first_of(" ;=") != std::string::npos)
-        return fail(errors::bad_character{});
+    for (const auto& t : l.tags) {
+      const std::string_view key = t.key;
+      if (key.empty() || !clean(key) || key.find_first_of(" ;=") != std::string_view::npos) return fail(errors::bad_character{});
       if (!first) out += ';';
       first = false;
-      out += t.key;
-      if (!t.value.empty()) {
+      out += key;
+      if (!t.text.empty()) {
         out += '=';
-        out.append_range(escaped(t.value));
+        if constexpr (std::same_as<S, std::string_view>) {
+          if (!clean(t.text) || t.text.find_first_of(" ;") != std::string_view::npos) return fail(errors::bad_character{});
+          out += t.text;
+        } else {
+          out.append_range(escaped(t.text));
+        }
       }
     }
     out += ' ';
@@ -292,18 +416,20 @@ constexpr std::expected<void, line_error> write(const line& l, std::string& out)
   if (l.from && !l.from->empty()) {
     const std::size_t at = out.size() + 1;
     out += ':';
-    write_source(*l.from, out);
+    out += l.from->nick;
+    if (!l.from->user.empty()) (out += '!') += l.from->user;
+    if (!l.from->host.empty()) (out += '@') += l.from->host;
     const std::string_view who = std::string_view(out).substr(at);
     if (!clean(who) || who.find(' ') != std::string_view::npos) return fail(errors::bad_character{});
     out += ' ';
   }
-  if (!detail::command_ok(l.command)) return fail(errors::bad_command{l.command});
+  if (!detail::command_ok(l.command)) return fail(errors::bad_command{std::string(l.command)});
   out += l.command;
   for (std::size_t i = 0; i < l.params.size(); ++i) {
-    const std::string& p = l.params[i];
+    const std::string_view p = l.params[i];
     if (!clean(p)) return fail(errors::bad_character{});
     const bool last = i + 1 == l.params.size();
-    const bool needs_colon = p.empty() || p.front() == ':' || p.find(' ') != std::string::npos;
+    const bool needs_colon = p.empty() || p.front() == ':' || p.find(' ') != std::string_view::npos;
     if (needs_colon && !last) return fail(errors::bad_parameter{i});
     out += ' ';
     if (needs_colon) out += ':';
@@ -313,10 +439,18 @@ constexpr std::expected<void, line_error> write(const line& l, std::string& out)
   if (out.size() - body_from > max_body_bytes) return fail(errors::body_too_long{out.size() - body_from});
   return {};
 }
-// The same, into a string of its own.
-constexpr std::expected<std::string, line_error> write(const line& l) {
+template <class S> constexpr void write(const basic_line<S>& l, std::string& out) {
+  if (auto done = try_write(l, out); !done) throw line_failure(std::move(done.error()));
+}
+// Into a string of its own.
+template <class S> constexpr std::expected<std::string, line_error> try_write(const basic_line<S>& l) {
   std::string out;
-  if (auto done = write(l, out); !done) return std::unexpected(done.error());
+  if (auto done = try_write(l, out); !done) return std::unexpected(std::move(done.error()));
+  return out;
+}
+template <class S> constexpr std::string write(const basic_line<S>& l) {
+  std::string out;
+  write(l, out);
   return out;
 }
 

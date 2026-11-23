@@ -7,7 +7,7 @@ import cairn;
 namespace {
 using namespace cairn;
 
-constexpr line parsed(std::string_view s) { return *parse(s); }
+constexpr line parsed(std::string_view s) { return to_owned(*try_parse(s)); }
 
 // Commands, sources, parameters (ircdocs parser-tests, msg-split).
 static_assert(parsed("foo bar baz asdf").command == "FOO");
@@ -39,38 +39,70 @@ static_assert(parsed("@+example.com/foo=bar foo").tags.front().client_only());
 static_assert(*parsed("@time=2026-11-23T18:00:00.000Z :n!u@h PRIVMSG #c :x").tag_value("time") == "2026-11-23T18:00:00.000Z");
 
 // What is not a line.
-static_assert(std::holds_alternative<errors::empty>(parse("").error()));
-static_assert(std::holds_alternative<errors::empty>(parse("   ").error()));
-static_assert(std::holds_alternative<errors::bad_tags>(parse("@ foo").error()));
-static_assert(std::holds_alternative<errors::bad_source>(parse(": foo").error()));
-static_assert(std::get<errors::bad_command>(parse("12 foo").error()).command == "12");
-static_assert(std::get<errors::bad_command>(parse("FO-O bar").error()).command == "FO-O");
-static_assert(describe(parse("FO-O bar").error()) == "malformed command");
+static_assert(std::holds_alternative<errors::empty>(try_parse("").error()));
+static_assert(std::holds_alternative<errors::empty>(try_parse("   ").error()));
+static_assert(std::holds_alternative<errors::bad_tags>(try_parse("@ foo").error()));
+static_assert(std::holds_alternative<errors::bad_source>(try_parse(": foo").error()));
+static_assert(std::get<errors::bad_command>(try_parse("12 foo").error()).command == "12");
+static_assert(std::get<errors::bad_command>(try_parse("FO-O bar").error()).command == "FO-O");
+static_assert(describe(try_parse("FO-O bar").error()) == "malformed command");
 
 // Writing (msg-join): the last parameter after ':' only where it has to be.
-constexpr std::string written(const line& l) { return *write(l); }
+constexpr std::string written(const line& l) { return *try_write(l); }
 static_assert(written(make("PRIVMSG", "#c", "hello there")) == "PRIVMSG #c :hello there\r\n");
 static_assert(written(make("JOIN", "#c")) == "JOIN #c\r\n");
 static_assert(written(make("TOPIC", "#c", "")) == "TOPIC #c :\r\n");
 static_assert(written(make("PRIVMSG", "#c", ":)")) == "PRIVMSG #c ::)\r\n");
 static_assert(written(line{{{"a", "b c;d\\"}, {"k", ""}}, source{"n", "u", "h"}, "PRIVMSG", {"#c", "x"}}) ==
               "@a=b\\sc\\:d\\\\;k :n!u@h PRIVMSG #c x\r\n");
-static_assert(std::get<errors::bad_parameter>(write(make("PRIVMSG", "a b", "x")).error()).index == 0);
-static_assert(std::holds_alternative<errors::bad_character>(write(make("PRIVMSG", "#c", "a\r\nQUIT")).error()));
-static_assert(std::get<errors::body_too_long>(write(make("PRIVMSG", "#c", std::string(500, 'x'))).error()).bytes == 513);  // PRIVMSG #c, a space, 500 bytes, CR LF
-static_assert(write(make("PRIVMSG", "#c", std::string(490, 'x'))).has_value());
+static_assert(std::get<errors::bad_parameter>(try_write(make("PRIVMSG", "a b", "x")).error()).index == 0);
+static_assert(std::holds_alternative<errors::bad_character>(try_write(make("PRIVMSG", "#c", "a\r\nQUIT")).error()));
+static_assert(std::get<errors::body_too_long>(try_write(make("PRIVMSG", "#c", std::string(500, 'x'))).error()).bytes == 513);  // PRIVMSG #c, a space, 500 bytes, CR LF
+static_assert(try_write(make("PRIVMSG", "#c", std::string(490, 'x'))).has_value());
 // Into the caller's buffer: appended; refused, the buffer as it was.
 static_assert([] {
   std::string out = "PING x\r\n";
-  return write(make("JOIN", "#c"), out).has_value() && out == "PING x\r\nJOIN #c\r\n";
+  return try_write(make("JOIN", "#c"), out).has_value() && out == "PING x\r\nJOIN #c\r\n";
 }());
 static_assert([] {
   std::string out = "PING x\r\n";
-  return !write(make("PRIVMSG", "a b", "x"), out) && out == "PING x\r\n";
+  return !try_write(make("PRIVMSG", "a b", "x"), out) && out == "PING x\r\n";
 }());
 // Read back as written.
 static_assert(parsed(written(line{{{"a", "b c;d\\"}}, source{"n", "u", "h"}, "PRIVMSG", {"#c", "x y"}})) ==
               line{{{"a", "b c;d\\"}}, source{"n", "u", "h"}, "PRIVMSG", {"#c", "x y"}});
+
+// Views into what was read: nothing copied, a tag's value unescaped as it
+// is read, and written back as it came.
+static_assert([] {
+  constexpr std::string_view text = "@a=b\\sc;k :n!u@h privmsg #c :hi there";
+  const line_view v = *try_parse(text);
+  return v.command.data() == text.data() + 17 && v.is("PRIVMSG") && v.from->nick == "n" && v.param(1) == "hi there" &&
+         v.tags[0].text == "b\\sc" && std::ranges::equal(v.tags[0].value(), std::string_view("b c")) &&
+         *v.tag_value("a") == "b c" && *try_write(v) == "@a=b\\sc;k :n!u@h privmsg #c :hi there\r\n" &&
+         to_owned(v).command == "PRIVMSG";
+}());
+
+// From an input range: a line at a time, the iterator left after it.
+static_assert([] {
+  const std::string wire = "PING :a\r\n:n!u@h PRIVMSG #c :x y\r\nbad-cmd\r\n";
+  // Not contiguous: what is read through a filter.
+  auto chars = wire | std::views::filter([](char) { return true; });
+  auto at = std::ranges::begin(chars);
+  const auto end = std::ranges::end(chars);
+  const auto first = try_read(at, end);
+  const auto second = try_read(at, end);
+  const auto third = try_read(at, end);
+  return first && first->command == "PING" && first->param(0) == "a" && second && second->param(1) == "x y" && !third &&
+         std::holds_alternative<errors::bad_command>(third.error()) && at == end;
+}());
+static_assert([] {
+  const std::string wire = "PING :a\r\n\r\nPONG :b\r\nNICK";
+  std::vector<std::string> commands;
+  for (const auto& one : lines(wire | std::views::filter([](char) { return true; })))
+    if (one) commands.push_back(one->command);
+  return commands == std::vector<std::string>{"PING", "PONG", "NICK"};
+}());
 
 // The views: escaped and unescaped as they are walked.
 static_assert(std::ranges::to<std::string>(escaped("a b;c\\d\r\n")) == "a\\sb\\:c\\\\d\\r\\n");
@@ -127,7 +159,7 @@ static_assert(told(":srv 005 me PREFIX= :are supported").prefixes.empty());
 
 int main() {
   // The same, when run: one of the constant ones, so the program does work.
-  const auto l = cairn::parse("@a=b\\sc :n!u@h PRIVMSG #c :hi there\r\n");
+  const auto l = cairn::try_parse("@a=b\\sc :n!u@h PRIVMSG #c :hi there\r\n");
   if (!l || *l->tag_value("a") != "b c" || l->params.back() != "hi there") return 1;
   std::println("cairn: line tests passed");
   return 0;

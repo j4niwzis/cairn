@@ -8,10 +8,10 @@ using namespace cairn;
 
 constexpr isupport libera() {
   isupport i;
-  i.take(*parse(":srv 005 me CHANTYPES=# PREFIX=(ov)@+ CHANMODES=beI,k,l,imnst :are supported"));
+  i.take(to_owned(*try_parse(":srv 005 me CHANTYPES=# PREFIX=(ov)@+ CHANMODES=beI,k,l,imnst :are supported")));
   return i;
 }
-constexpr message got(std::string_view s) { return read(*parse(s), libera()); }
+constexpr message got(std::string_view s) { return read(*try_parse(s), libera()); }
 template <class T> constexpr const T& as(const message& m) { return std::get<T>(m.what); }
 template <class T> constexpr bool is(const message& m) { return std::holds_alternative<T>(m.what); }
 
@@ -57,7 +57,7 @@ static_assert(is<msg::unknown>(got(":srv WALLOPS :hello")));
 static_assert(*got("@msgid=abc;time=2026-11-23T18:00:00Z :n!u@h PRIVMSG #a :x").line.tag_value("msgid") == "abc");
 
 // Written.
-constexpr std::string out(const message_t& m) { return *write(to_line(m)); }
+constexpr std::string out(const message_t& m) { return *try_write(to_line(m)); }
 static_assert(out(msg::privmsg{"#a", "hello there"}) == "PRIVMSG #a :hello there\r\n");
 static_assert(out(msg::action{"#a", "waves"}) == "PRIVMSG #a :\x01" "ACTION waves\x01\r\n");
 static_assert(out(msg::ctcp{"n", "VERSION", "mux 1.0", true}) == "NOTICE n :\x01VERSION mux 1.0\x01\r\n");
@@ -74,7 +74,7 @@ static_assert(as<msg::mode>(got(out(msg::mode{"#a", {{true, 'o', "alice"}, {fals
 }  // namespace
 
 int main() {
-  const auto m = cairn::read(*cairn::parse(":n!u@h PRIVMSG #a :\x01" "ACTION waves\x01"));
+  const auto m = cairn::read(cairn::parse(":n!u@h PRIVMSG #a :\x01" "ACTION waves\x01"));
   if (std::get<cairn::msg::action>(m.what).text != "waves") return 1;
   std::println("cairn: message tests passed");
   return 0;
