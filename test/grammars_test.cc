@@ -4,6 +4,9 @@
 import std;
 import splice;
 import cairn;
+import gtest;
+
+#include "gtest/gtest-macros.h"
 
 namespace {
 constexpr std::array cases = {
@@ -25,12 +28,11 @@ template <class Grammar> bool same_as_by_hand(std::string_view text) {
 }
 }  // namespace
 
-int main() {
-  int failed = 0;
+TEST(Grammars, StdRegexReadsAsByHand) {
   for (std::string_view one : cases) {
     if (!same_as_by_hand<cairn::grammars::std_regex>(one)) {
       std::println("std_regex differs on [{}]", one);
-      ++failed;
+      ADD_FAILURE();
     }
   }
   // Where by hand reads a line, the regular expressions alone read it too --
@@ -41,7 +43,7 @@ int main() {
     const auto got = cairn::grammars::std_regex::read_alone(one);
     if (!got || cairn::to_owned(*got) != cairn::to_owned(*cairn::try_parse<cairn::grammars::by_hand>(one))) {
       std::println("std_regex alone does not read [{}]", one);
-      ++failed;
+      ADD_FAILURE();
     }
     ++alone;
   }
@@ -53,14 +55,11 @@ int main() {
   std::vector<std::string> commands;
   for (const auto& one : cairn::lines<cairn::grammars::std_regex>(wire))
     if (one) commands.push_back(one->command);
-  if (commands != std::vector<std::string>{"PING", "PRIVMSG"}) ++failed;
+  if (commands != std::vector<std::string>{"PING", "PRIVMSG"}) ADD_FAILURE();
   try {
     (void)cairn::parse<cairn::grammars::std_regex>("12 foo");
-    ++failed;
+    ADD_FAILURE();
   } catch (const cairn::line_failure& e) {
-    if (!spl::holds_alternative<cairn::errors::bad_command>(e.error)) ++failed;
+    if (!spl::holds_alternative<cairn::errors::bad_command>(e.error)) ADD_FAILURE();
   }
-  if (failed) return 1;
-  std::println("cairn: grammar tests passed ({} lines, std_regex as by hand; {} read by the regular expressions alone)", cases.size(), alone);
-  return 0;
 }

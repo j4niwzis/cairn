@@ -3,6 +3,9 @@
 import std;
 import splice;
 import cairn;
+import gtest;
+
+#include "gtest/gtest-macros.h"
 
 namespace {
 using namespace cairn;
@@ -74,9 +77,7 @@ static_assert(as<msg::mode>(got(out(msg::mode{"#a", {{true, 'o', "alice"}, {fals
               std::vector<msg::mode_change>{{true, 'o', "alice"}, {false, 'k', "key"}});
 }  // namespace
 
-int main() {
+TEST(Messages, ActionReadWhenRun) {
   const auto m = cairn::read(cairn::parse(":n!u@h PRIVMSG #a :\x01" "ACTION waves\x01"));
-  if (spl::get<cairn::msg::action>(m.what).text != "waves") return 1;
-  std::println("cairn: message tests passed");
-  return 0;
+  if (spl::get<cairn::msg::action>(m.what).text != "waves") FAIL();
 }

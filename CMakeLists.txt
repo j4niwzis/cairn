@@ -41,12 +41,39 @@ target_compile_options(cairn PUBLIC
   $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fconstexpr-steps=${CAIRN_CONSTEXPR_STEPS}>)
 add_library(cairn::cairn ALIAS cairn)
 
-# The tests: static_asserts, checked while they compile, and a run each.
+# The tests: googletest's, as a module, from cmake-everywhere, as mux's are.
+# The static_asserts in them are checked while they compile; the TESTs run.
 if(CAIRN_TESTS)
   enable_testing()
+  cme_declare_port(NAME googletest-modules PROVIDES GTest
+    GITHUB_REPOSITORY j4niwzis/googletest-modules
+    GIT_TAG 706920f1d230f0316d271466d8885735be3e300e
+    LICENSE BSD-3-Clause
+    SYSTEM NEVER
+    TARGETS gtest_main)
+  cme_options(googletest-modules
+    "BUILD_GMOCK OFF" "INSTALL_GTEST OFF" "gtest_build_modules ON"
+    "gtest_build_tests OFF" "gtest_build_samples OFF")
+  cme_find_package(GTest REQUIRED)
+  # googletest-modules sets C++23 outright; this build is C++26, and CMake
+  # stops at two std modules in one build. Its targets are built as C++26.
+  foreach(target IN ITEMS gtest gtest_main)
+    if(TARGET ${target})
+      get_target_property(aliased ${target} ALIASED_TARGET)
+      if(aliased)
+        set(target ${aliased})
+      endif()
+      set_target_properties(${target} PROPERTIES CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON)
+    endif()
+  endforeach()
+  if(TARGET GTest::gtest_main)
+    set(cairn_gtest GTest::gtest_main)
+  else()
+    set(cairn_gtest gtest_main)
+  endif()
   foreach(name IN ITEMS line messages grammars)
     add_executable(cairn-${name}-test test/${name}_test.cc)
-    target_link_libraries(cairn-${name}-test PRIVATE cairn)
+    target_link_libraries(cairn-${name}-test PRIVATE cairn ${cairn_gtest})
     add_test(NAME ${name} COMMAND cairn-${name}-test)
   endforeach()
 endif()

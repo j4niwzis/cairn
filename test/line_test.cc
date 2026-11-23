@@ -4,6 +4,9 @@
 import std;
 import splice;
 import cairn;
+import gtest;
+
+#include "gtest/gtest-macros.h"
 
 namespace {
 using namespace cairn;
@@ -158,10 +161,8 @@ static_assert([] {
 static_assert(told(":srv 005 me PREFIX= :are supported").prefixes.empty());
 }  // namespace
 
-int main() {
+TEST(Line, ReadWrittenAndThrownWhenRun) {
   // The same, when run: one of the constant ones, so the program does work.
   const auto l = cairn::try_parse("@a=b\\sc :n!u@h PRIVMSG #c :hi there\r\n");
-  if (!l || *l->tag_value("a") != "b c" || l->params.back() != "hi there") return 1;
-  std::println("cairn: line tests passed");
-  return 0;
+  if (!l || *l->tag_value("a") != "b c" || l->params.back() != "hi there") FAIL();
 }
