@@ -35,7 +35,7 @@ set(CAIRN_CONSTEXPR_STEPS 100000000 CACHE STRING
 # One library, its modules in one file set.
 add_library(cairn)
 target_sources(cairn PUBLIC FILE_SET CXX_MODULES BASE_DIRS src
-  FILES src/line.cc src/grammar.cc src/read.cc src/casemap.cc src/isupport.cc src/messages.cc src/numerics.cc src/client.cc src/channels.cc src/cairn.cc)
+  FILES src/line.cc src/grammar.cc src/read.cc src/casemap.cc src/isupport.cc src/messages.cc src/numerics.cc src/client.cc src/channels.cc src/format.cc src/cairn.cc)
 target_compile_features(cairn PUBLIC cxx_std_26)
 target_link_libraries(cairn PUBLIC splice)
 target_compile_options(cairn PUBLIC
@@ -73,7 +73,7 @@ if(CAIRN_TESTS)
   else()
     set(cairn_gtest gtest_main)
   endif()
-  foreach(name IN ITEMS line messages client channels allocations)
+  foreach(name IN ITEMS line messages client channels format allocations)
     add_executable(cairn-${name}-test test/${name}_test.cc)
     target_link_libraries(cairn-${name}-test PRIVATE cairn ${cairn_gtest})
     add_test(NAME ${name} COMMAND cairn-${name}-test)
