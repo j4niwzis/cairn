@@ -92,6 +92,116 @@ constexpr std::optional<std::pair<std::string, std::string>> ctcp_of(std::string
 }
 }  // namespace detail
 
+// ---- commands said once: what each reads into, both ways -----------------
+//
+// A command is its name, the type it is read into, and the shape of its
+// parameters -- a slot each, in the order of the type's fields:
+//   {name}    one parameter                         (std::string)
+//   {name?}   one, or none at the end               (std::string, or std::optional of one)
+//   {name,}   one, a list split at commas           (std::vector<std::string>)
+//   {name...} every one left                        (std::vector<std::string>)
+// The names say what the slot is for; their number is checked against the
+// type's fields. Reading and writing are both made from it.
+namespace shape {
+template <std::size_t N> struct text {
+  char chars[N]{};
+  constexpr text(const char (&s)[N]) { std::copy_n(s, N, chars); }
+  constexpr std::string_view view() const { return {chars, N - 1}; }
+};
+enum class slot_kind { one, maybe, list, rest };
+template <text S> consteval auto slots() {
+  std::array<slot_kind, std::ranges::count(S.view(), '{')> out{};
+  std::size_t at = 0, i = 0;
+  const std::string_view v = S.view();
+  while ((at = v.find('{', at)) != std::string_view::npos) {
+    const auto close = v.find('}', at);
+    const std::string_view inside = v.substr(at + 1, close - at - 1);
+    out[i++] = inside.ends_with("...") ? slot_kind::rest
+             : inside.ends_with(",")   ? slot_kind::list
+             : inside.ends_with("?")   ? slot_kind::maybe
+                                       : slot_kind::one;
+    at = close;
+  }
+  return out;
+}
+}  // namespace shape
+
+template <shape::text Name, class T, shape::text Shape> struct command {
+  using type = T;
+  static constexpr std::string_view name = Name.view();
+  static constexpr auto slots = shape::slots<Shape>();
+
+  static constexpr T read(const line& l) {
+    T out{};
+    auto& [... field] = out;
+    static_assert(sizeof...(field) == slots.size(), "a slot for every field of the type, and a field for every slot");
+    std::size_t at = 0;
+    std::size_t i = 0;
+    ((take(field, slots[i++], l, at)), ...);
+    return out;
+  }
+  static constexpr line write(const T& value) {
+    line l = make(std::string(name));
+    const auto& [... field] = value;
+    std::size_t i = 0;
+    ((put(field, slots[i++], l)), ...);
+    return l;
+  }
+
+ private:
+  template <class F> static constexpr void take(F& into, shape::slot_kind kind, const line& l, std::size_t& at) {
+    const bool there = at < l.params.size();
+    if constexpr (std::same_as<F, std::string>) {
+      if (there) into = l.params[at++];
+    } else if constexpr (std::same_as<F, std::optional<std::string>>) {
+      if (there) into = l.params[at++];
+    } else if constexpr (std::same_as<F, std::vector<std::string>>) {
+      if (kind == shape::slot_kind::rest) {
+        while (at < l.params.size()) into.push_back(l.params[at++]);
+      } else if (there) {
+        into = detail::split_commas(l.params[at++]);
+      }
+    }
+  }
+  template <class F> static constexpr void put(const F& from, shape::slot_kind kind, line& l) {
+    if constexpr (std::same_as<F, std::string>) {
+      if (kind == shape::slot_kind::one || !from.empty()) l.params.push_back(from);
+    } else if constexpr (std::same_as<F, std::optional<std::string>>) {
+      if (from) l.params.push_back(*from);
+    } else if constexpr (std::same_as<F, std::vector<std::string>>) {
+      if (kind == shape::slot_kind::rest)
+        l.params.insert(l.params.end(), from.begin(), from.end());
+      else if (!from.empty() || kind == shape::slot_kind::list)
+        l.params.push_back(detail::join_commas(from));
+    }
+  }
+};
+
+// The commands said as shapes. What a shape cannot say -- CTCP inside
+// PRIVMSG and NOTICE, extended-join, MODE's changes, CAP and BATCH, the
+// numerics -- is read by hand below.
+using commands = std::tuple<
+    command<"TAGMSG", msg::tagmsg, "{target}">,
+    command<"PART", msg::part, "{channels,} {reason?}">,
+    command<"QUIT", msg::quit, "{reason?}">,
+    command<"KICK", msg::kick, "{channel} {nick} {reason?}">,
+    command<"NICK", msg::nick, "{to}">,
+    command<"TOPIC", msg::topic, "{channel} {text?}">,
+    command<"INVITE", msg::invite, "{nick} {channel}">,
+    command<"AWAY", msg::away, "{text?}">,
+    command<"ACCOUNT", msg::account, "{name}">,
+    command<"CHGHOST", msg::chghost, "{user} {host}">,
+    command<"SETNAME", msg::setname, "{realname}">,
+    command<"PING", msg::ping, "{token}">,
+    command<"ERROR", msg::error, "{text}">,
+    command<"AUTHENTICATE", msg::authenticate, "{data}">>;
+
+// The command a type is said as, where it is.
+template <class T, class Table = commands> struct command_of;
+template <class T, class... C> struct command_of<T, std::tuple<C...>> {
+  static constexpr std::size_t count = ((std::same_as<typename C::type, T> ? 1 : 0) + ... + 0);
+};
+
 // MODE's changes, as ISUPPORT says which modes take an argument: "+ov-k a b c".
 constexpr std::vector<msg::mode_change> parse_modes(const std::vector<std::string>& params, std::size_t from,
                                                                   const isupport& server, bool channel) {
@@ -126,46 +236,22 @@ constexpr message read(line l, const isupport& server = {}) {
     } else {
       what = msg::privmsg{p(0), p(1)};
     }
-  } else if (l.is("TAGMSG")) {
-    what = msg::tagmsg{p(0)};
+  } else if (const bool said = [&]<class... C>(std::tuple<C...>*) {
+               return ((l.is(C::name) ? (what = C::read(l), true) : false) || ...);
+             }(static_cast<commands*>(nullptr))) {
+    // read as its shape says
   } else if (l.is("JOIN")) {
     what = msg::join{detail::split_commas(l.param(0)), detail::split_commas(l.param(1)),
                      l.params.size() >= 3 ? p(1) : std::string(), l.params.size() >= 3 ? p(2) : std::string()};
     if (l.params.size() >= 3) spl::get<msg::join>(what).keys.clear();  // extended-join: account and realname, not keys
-  } else if (l.is("PART")) {
-    what = msg::part{detail::split_commas(l.param(0)), p(1)};
-  } else if (l.is("QUIT")) {
-    what = msg::quit{p(0)};
-  } else if (l.is("KICK")) {
-    what = msg::kick{p(0), p(1), p(2)};
-  } else if (l.is("NICK")) {
-    what = msg::nick{p(0)};
-  } else if (l.is("TOPIC")) {
-    what = msg::topic{p(0), l.params.size() > 1 ? std::optional<std::string>(p(1)) : std::nullopt};
-  } else if (l.is("INVITE")) {
-    what = msg::invite{p(0), p(1)};
   } else if (l.is("MODE")) {
     what = msg::mode{p(0), parse_modes(l.params, 1, server, server.is_channel(l.param(0)))};
-  } else if (l.is("AWAY")) {
-    what = msg::away{l.params.empty() ? std::nullopt : std::optional<std::string>(p(0))};
-  } else if (l.is("ACCOUNT")) {
-    what = msg::account{p(0)};
-  } else if (l.is("CHGHOST")) {
-    what = msg::chghost{p(0), p(1)};
-  } else if (l.is("SETNAME")) {
-    what = msg::setname{p(0)};
-  } else if (l.is("PING")) {
-    what = msg::ping{p(0)};
   } else if (l.is("PONG")) {
     what = msg::pong{l.params.empty() ? std::string() : l.params.back()};
-  } else if (l.is("ERROR")) {
-    what = msg::error{p(0)};
   } else if (l.is("CAP")) {
     msg::cap cp{p(1), {}};
     if (l.params.size() > 2) cp.params.assign(l.params.begin() + 2, l.params.end());
     what = std::move(cp);
-  } else if (l.is("AUTHENTICATE")) {
-    what = msg::authenticate{p(0)};
   } else if (l.is("BATCH")) {
     const std::string_view ref = l.param(0);
     msg::batch b{!ref.empty() && ref.front() == '+', std::string(ref.empty() ? ref : ref.substr(1)), p(1), {}};
@@ -181,32 +267,26 @@ constexpr message read(const line_view& l, const isupport& server = {}) { return
 // unknown, a batch's end and the like are lines of their own (make()).
 constexpr line to_line(const message_t& m) {
   return spl::visit(spl::overloaded{
+      []<class T>(const T& x) -> line
+        requires(command_of<T>::count == 1)
+      {
+        line out;
+        [&]<class... C>(std::tuple<C...>*) {
+          (([&] { if constexpr (std::same_as<typename C::type, T>) out = C::write(x); }()), ...);
+        }(static_cast<commands*>(nullptr));
+        return out;
+      },
       [](const msg::privmsg& x) { return make("PRIVMSG", x.target, x.text); },
       [](const msg::notice& x) { return make("NOTICE", x.target, x.text); },
       [](const msg::action& x) { return make("PRIVMSG", x.target, "\x01" "ACTION " + x.text + "\x01"); },
       [](const msg::ctcp& x) {
         return make(x.reply ? "NOTICE" : "PRIVMSG", x.target, "\x01" + x.command + (x.text.empty() ? "" : " " + x.text) + "\x01");
       },
-      [](const msg::tagmsg& x) { return make("TAGMSG", x.target); },
       [](const msg::join& x) {
         line l = make("JOIN", detail::join_commas(x.channels));
         if (!x.keys.empty()) l.params.push_back(detail::join_commas(x.keys));
         return l;
       },
-      [](const msg::part& x) {
-        line l = make("PART", detail::join_commas(x.channels));
-        if (!x.reason.empty()) l.params.push_back(x.reason);
-        return l;
-      },
-      [](const msg::quit& x) { return x.reason.empty() ? make("QUIT") : make("QUIT", x.reason); },
-      [](const msg::kick& x) {
-        line l = make("KICK", x.channel, x.nick);
-        if (!x.reason.empty()) l.params.push_back(x.reason);
-        return l;
-      },
-      [](const msg::nick& x) { return make("NICK", x.to); },
-      [](const msg::topic& x) { return x.text ? make("TOPIC", x.channel, *x.text) : make("TOPIC", x.channel); },
-      [](const msg::invite& x) { return make("INVITE", x.nick, x.channel); },
       [](const msg::mode& x) {
         line l = make("MODE", x.target);
         std::string letters;
@@ -221,16 +301,12 @@ constexpr line to_line(const message_t& m) {
           if (!one.argument.empty()) l.params.push_back(one.argument);
         return l;
       },
-      [](const msg::away& x) { return x.text ? make("AWAY", *x.text) : make("AWAY"); },
-      [](const msg::setname& x) { return make("SETNAME", x.realname); },
-      [](const msg::ping& x) { return make("PING", x.token); },
       [](const msg::pong& x) { return make("PONG", x.token); },
       [](const msg::cap& x) {
         line l = make("CAP", x.subcommand);
         for (const auto& one : x.params) l.params.push_back(one);
         return l;
       },
-      [](const msg::authenticate& x) { return make("AUTHENTICATE", x.data); },
       [](const auto&) { return line{}; },
   }, m);
 }
