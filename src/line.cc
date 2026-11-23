@@ -8,29 +8,43 @@ import std;
 
 export namespace cairn {
 
-// What reading or writing a line can come to besides a line.
-enum class line_error {
-  empty,              // nothing but spaces, or no command
-  bad_tags,           // '@' with no tags after it
-  bad_source,         // ':' with no source after it
-  bad_command,        // neither letters nor three digits
-  tags_too_long,      // more than 8191 bytes of tags, '@' and the space included
-  body_too_long,      // more than 512 bytes from the source on, CR LF included
-  bad_parameter,      // a middle parameter empty, with a space, or starting with ':'
-  bad_character,      // CR, LF or NUL inside what is written
+// What reading or writing a line can come to besides a line: a type each,
+// with what it knows, and what it says of itself (what).
+namespace errors {
+struct empty { static constexpr std::string_view what = "empty line"; };  // nothing but spaces, or no command
+struct bad_tags { static constexpr std::string_view what = "tags marker with no tags"; };
+struct bad_source { static constexpr std::string_view what = "source marker with no source"; };
+struct bad_command {  // neither letters nor three digits
+  std::string command;
+  static constexpr std::string_view what = "malformed command";
+  friend constexpr bool operator==(const bad_command&, const bad_command&) = default;
 };
-constexpr std::string_view describe(line_error e) {
-  switch (e) {
-    case line_error::empty: return "empty line";
-    case line_error::bad_tags: return "tags marker with no tags";
-    case line_error::bad_source: return "source marker with no source";
-    case line_error::bad_command: return "malformed command";
-    case line_error::tags_too_long: return "tags longer than 8191 bytes";
-    case line_error::body_too_long: return "line longer than 512 bytes";
-    case line_error::bad_parameter: return "malformed middle parameter";
-    case line_error::bad_character: return "CR, LF or NUL in a line";
-  }
-  return "unknown";
+struct tags_too_long {  // past 8191 bytes, '@' and the space included
+  std::size_t bytes = 0;
+  static constexpr std::string_view what = "tags longer than 8191 bytes";
+  friend constexpr bool operator==(const tags_too_long&, const tags_too_long&) = default;
+};
+struct body_too_long {  // past 512 bytes from the source on, CR LF included
+  std::size_t bytes = 0;
+  static constexpr std::string_view what = "line longer than 512 bytes";
+  friend constexpr bool operator==(const body_too_long&, const body_too_long&) = default;
+};
+struct bad_parameter {  // a middle parameter empty, with a space, or ':' first
+  std::size_t index = 0;
+  static constexpr std::string_view what = "malformed middle parameter";
+  friend constexpr bool operator==(const bad_parameter&, const bad_parameter&) = default;
+};
+struct bad_character { static constexpr std::string_view what = "CR, LF or NUL in a line"; };
+constexpr bool operator==(empty, empty) { return true; }
+constexpr bool operator==(bad_tags, bad_tags) { return true; }
+constexpr bool operator==(bad_source, bad_source) { return true; }
+constexpr bool operator==(bad_character, bad_character) { return true; }
+}  // namespace errors
+using line_error = std::variant<errors::empty, errors::bad_tags, errors::bad_source, errors::bad_command,
+                                errors::tags_too_long, errors::body_too_long, errors::bad_parameter,
+                                errors::bad_character>;
+constexpr std::string_view describe(const line_error& e) {
+  return std::visit([](const auto& one) { return std::remove_cvref_t<decltype(one)>::what; }, e);
 }
 
 inline constexpr std::size_t max_tags_bytes = 8191;
@@ -80,40 +94,80 @@ struct line {
   friend constexpr bool operator==(const line&, const line&) = default;
 };
 
-// A tag's value as the wire carries it, and back (IRCv3 message-tags).
-constexpr std::string unescape_tag_value(std::string_view in) {
-  std::string out;
-  out.reserve(in.size());
-  for (std::size_t i = 0; i < in.size(); ++i) {
-    if (in[i] != '\\') {
-      out += in[i];
-      continue;
-    }
-    if (++i == in.size()) break;  // a lone backslash at the end is dropped
-    switch (in[i]) {
-      case ':': out += ';'; break;
-      case 's': out += ' '; break;
-      case '\\': out += '\\'; break;
-      case 'r': out += '\r'; break;
-      case 'n': out += '\n'; break;
-      default: out += in[i]; break;  // any other: the character itself
-    }
-  }
-  return out;
-}
-// Written straight into what is being written, nothing made on the way.
-constexpr void escape_tag_value(std::string_view in, std::string& out) {
-  for (char c : in) {
-    switch (c) {
-      case ';': out += "\\:"; break;
-      case ' ': out += "\\s"; break;
-      case '\\': out += "\\\\"; break;
-      case '\r': out += "\\r"; break;
-      case '\n': out += "\\n"; break;
-      default: out += c; break;
-    }
+// A tag's value as the wire carries it, and back (IRCv3 message-tags), as
+// views: read a character at a time as they are walked, nothing made.
+namespace detail {
+// One character, or the two of its escape.
+struct escape_piece {
+  std::array<char, 2> chars{};
+  std::uint8_t size = 0;
+  constexpr const char* begin() const { return chars.data(); }
+  constexpr const char* end() const { return chars.data() + size; }
+};
+constexpr escape_piece escape_one(char c) {
+  switch (c) {
+    case ';': return {{'\\', ':'}, 2};
+    case ' ': return {{'\\', 's'}, 2};
+    case '\\': return {{'\\', '\\'}, 2};
+    case '\r': return {{'\\', 'r'}, 2};
+    case '\n': return {{'\\', 'n'}, 2};
+    default: return {{c, 0}, 1};
   }
 }
+}  // namespace detail
+
+constexpr auto escaped(std::string_view in) { return in | std::views::transform(detail::escape_one) | std::views::join; }
+
+// Unescaped: \: \s \\ \r \n as what they stand for, any other escaped
+// character as itself, a lone backslash at the end dropped.
+class unescaped_view : public std::ranges::view_interface<unescaped_view> {
+ public:
+  class iterator {
+   public:
+    using value_type = char;
+    using difference_type = std::ptrdiff_t;
+    constexpr iterator() = default;
+    constexpr iterator(const char* at, const char* end) : at_(at), end_(end) { settle(); }
+    constexpr char operator*() const {
+      if (*at_ != '\\') return *at_;
+      switch (at_[1]) {
+        case ':': return ';';
+        case 's': return ' ';
+        case 'r': return '\r';
+        case 'n': return '\n';
+        default: return at_[1];
+      }
+    }
+    constexpr iterator& operator++() {
+      at_ += *at_ == '\\' ? 2 : 1;
+      settle();
+      return *this;
+    }
+    constexpr iterator operator++(int) {
+      iterator was = *this;
+      ++*this;
+      return was;
+    }
+    constexpr bool operator==(std::default_sentinel_t) const { return at_ == end_; }
+    constexpr bool operator==(const iterator& other) const { return at_ == other.at_; }
+
+   private:
+    // A backslash with nothing after it: the end.
+    constexpr void settle() {
+      if (at_ != end_ && *at_ == '\\' && at_ + 1 == end_) at_ = end_;
+    }
+    const char* at_ = nullptr;
+    const char* end_ = nullptr;
+  };
+  constexpr unescaped_view() = default;
+  constexpr explicit unescaped_view(std::string_view in) : in_(in) {}
+  constexpr iterator begin() const { return {in_.data(), in_.data() + in_.size()}; }
+  constexpr std::default_sentinel_t end() const { return {}; }
+
+ private:
+  std::string_view in_;
+};
+constexpr unescaped_view unescaped(std::string_view in) { return unescaped_view(in); }
 
 // nick!user@host, or a server's name.
 constexpr source parse_source(std::string_view in) {
@@ -159,18 +213,18 @@ constexpr std::expected<line, line_error> parse(std::string_view in) {
   while (!in.empty() && (in.back() == '\n' || in.back() == '\r')) in.remove_suffix(1);
   line out;
   in = detail::skip_spaces(in);
-  if (in.empty()) return std::unexpected(line_error::empty);
+  if (in.empty()) return std::unexpected(errors::empty{});
   if (in.front() == '@') {
     in.remove_prefix(1);
     const std::string_view all = detail::take_word(in);
-    if (all.empty()) return std::unexpected(line_error::bad_tags);
+    if (all.empty()) return std::unexpected(errors::bad_tags{});
     std::size_t from = 0;
     while (from <= all.size()) {
       const auto end = std::min(all.find(';', from), all.size());
       const std::string_view one = all.substr(from, end - from);
       if (!one.empty()) {
         const auto eq = one.find('=');
-        tag t{std::string(one.substr(0, eq)), eq == std::string_view::npos ? std::string() : unescape_tag_value(one.substr(eq + 1))};
+        tag t{std::string(one.substr(0, eq)), eq == std::string_view::npos ? std::string() : std::ranges::to<std::string>(unescaped(one.substr(eq + 1)))};
         // A key given twice: the last one counts.
         if (auto same = std::ranges::find(out.tags, t.key, &tag::key); same != out.tags.end())
           *same = std::move(t);
@@ -184,13 +238,13 @@ constexpr std::expected<line, line_error> parse(std::string_view in) {
   if (!in.empty() && in.front() == ':') {
     in.remove_prefix(1);
     const std::string_view who = detail::take_word(in);
-    if (who.empty()) return std::unexpected(line_error::bad_source);
+    if (who.empty()) return std::unexpected(errors::bad_source{});
     out.from = parse_source(who);
     in = detail::skip_spaces(in);
   }
   const std::string_view command = detail::take_word(in);
-  if (command.empty()) return std::unexpected(line_error::empty);
-  if (!detail::command_ok(command)) return std::unexpected(line_error::bad_command);
+  if (command.empty()) return std::unexpected(errors::empty{});
+  if (!detail::command_ok(command)) return std::unexpected(errors::bad_command{std::string(command)});
   out.command.reserve(command.size());
   for (char c : command) out.command += detail::upper(c);
   for (;;) {
@@ -210,9 +264,9 @@ constexpr std::expected<line, line_error> parse(std::string_view in) {
 // ':' where it has to be (empty, a space in it, or ':' first).
 constexpr std::expected<void, line_error> write(const line& l, std::string& out) {
   const std::size_t began = out.size();
-  const auto fail = [&](line_error e) {
+  const auto fail = [&](line_error e) -> std::unexpected<line_error> {
     out.resize(began);
-    return std::unexpected(e);
+    return std::unexpected(std::move(e));
   };
   const auto clean = [](std::string_view s) {
     return std::ranges::none_of(s, [](char c) { return c == '\r' || c == '\n' || c == '\0'; });
@@ -222,17 +276,17 @@ constexpr std::expected<void, line_error> write(const line& l, std::string& out)
     bool first = true;
     for (const tag& t : l.tags) {
       if (t.key.empty() || !clean(t.key) || t.key.find_first_of(" ;=") != std::string::npos)
-        return fail(line_error::bad_character);
+        return fail(errors::bad_character{});
       if (!first) out += ';';
       first = false;
       out += t.key;
       if (!t.value.empty()) {
         out += '=';
-        escape_tag_value(t.value, out);
+        out.append_range(escaped(t.value));
       }
     }
     out += ' ';
-    if (out.size() - began > max_tags_bytes) return fail(line_error::tags_too_long);
+    if (out.size() - began > max_tags_bytes) return fail(errors::tags_too_long{out.size() - began});
   }
   const std::size_t body_from = out.size();
   if (l.from && !l.from->empty()) {
@@ -240,23 +294,23 @@ constexpr std::expected<void, line_error> write(const line& l, std::string& out)
     out += ':';
     write_source(*l.from, out);
     const std::string_view who = std::string_view(out).substr(at);
-    if (!clean(who) || who.find(' ') != std::string_view::npos) return fail(line_error::bad_character);
+    if (!clean(who) || who.find(' ') != std::string_view::npos) return fail(errors::bad_character{});
     out += ' ';
   }
-  if (!detail::command_ok(l.command)) return fail(line_error::bad_command);
+  if (!detail::command_ok(l.command)) return fail(errors::bad_command{l.command});
   out += l.command;
   for (std::size_t i = 0; i < l.params.size(); ++i) {
     const std::string& p = l.params[i];
-    if (!clean(p)) return fail(line_error::bad_character);
+    if (!clean(p)) return fail(errors::bad_character{});
     const bool last = i + 1 == l.params.size();
     const bool needs_colon = p.empty() || p.front() == ':' || p.find(' ') != std::string::npos;
-    if (needs_colon && !last) return fail(line_error::bad_parameter);
+    if (needs_colon && !last) return fail(errors::bad_parameter{i});
     out += ' ';
     if (needs_colon) out += ':';
     out += p;
   }
   out += "\r\n";
-  if (out.size() - body_from > max_body_bytes) return fail(line_error::body_too_long);
+  if (out.size() - body_from > max_body_bytes) return fail(errors::body_too_long{out.size() - body_from});
   return {};
 }
 // The same, into a string of its own.

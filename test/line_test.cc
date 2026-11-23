@@ -39,12 +39,13 @@ static_assert(parsed("@+example.com/foo=bar foo").tags.front().client_only());
 static_assert(*parsed("@time=2026-11-23T18:00:00.000Z :n!u@h PRIVMSG #c :x").tag_value("time") == "2026-11-23T18:00:00.000Z");
 
 // What is not a line.
-static_assert(parse("").error() == line_error::empty);
-static_assert(parse("   ").error() == line_error::empty);
-static_assert(parse("@ foo").error() == line_error::bad_tags);
-static_assert(parse(": foo").error() == line_error::bad_source);
-static_assert(parse("12 foo").error() == line_error::bad_command);
-static_assert(parse("FO-O bar").error() == line_error::bad_command);
+static_assert(std::holds_alternative<errors::empty>(parse("").error()));
+static_assert(std::holds_alternative<errors::empty>(parse("   ").error()));
+static_assert(std::holds_alternative<errors::bad_tags>(parse("@ foo").error()));
+static_assert(std::holds_alternative<errors::bad_source>(parse(": foo").error()));
+static_assert(std::get<errors::bad_command>(parse("12 foo").error()).command == "12");
+static_assert(std::get<errors::bad_command>(parse("FO-O bar").error()).command == "FO-O");
+static_assert(describe(parse("FO-O bar").error()) == "malformed command");
 
 // Writing (msg-join): the last parameter after ':' only where it has to be.
 constexpr std::string written(const line& l) { return *write(l); }
@@ -54,9 +55,9 @@ static_assert(written(make("TOPIC", "#c", "")) == "TOPIC #c :\r\n");
 static_assert(written(make("PRIVMSG", "#c", ":)")) == "PRIVMSG #c ::)\r\n");
 static_assert(written(line{{{"a", "b c;d\\"}, {"k", ""}}, source{"n", "u", "h"}, "PRIVMSG", {"#c", "x"}}) ==
               "@a=b\\sc\\:d\\\\;k :n!u@h PRIVMSG #c x\r\n");
-static_assert(write(make("PRIVMSG", "a b", "x")).error() == line_error::bad_parameter);
-static_assert(write(make("PRIVMSG", "#c", "a\r\nQUIT")).error() == line_error::bad_character);
-static_assert(write(make("PRIVMSG", "#c", std::string(500, 'x'))).error() == line_error::body_too_long);
+static_assert(std::get<errors::bad_parameter>(write(make("PRIVMSG", "a b", "x")).error()).index == 0);
+static_assert(std::holds_alternative<errors::bad_character>(write(make("PRIVMSG", "#c", "a\r\nQUIT")).error()));
+static_assert(std::get<errors::body_too_long>(write(make("PRIVMSG", "#c", std::string(500, 'x'))).error()).bytes == 514);
 static_assert(write(make("PRIVMSG", "#c", std::string(490, 'x'))).has_value());
 // Into the caller's buffer: appended; refused, the buffer as it was.
 static_assert([] {
@@ -70,6 +71,13 @@ static_assert([] {
 // Read back as written.
 static_assert(parsed(written(line{{{"a", "b c;d\\"}}, source{"n", "u", "h"}, "PRIVMSG", {"#c", "x y"}})) ==
               line{{{"a", "b c;d\\"}}, source{"n", "u", "h"}, "PRIVMSG", {"#c", "x y"}});
+
+// The views: escaped and unescaped as they are walked.
+static_assert(std::ranges::to<std::string>(escaped("a b;c\\d\r\n")) == "a\\sb\\:c\\\\d\\r\\n");
+static_assert(std::ranges::to<std::string>(unescaped("a\\sb\\:c\\\\d\\r\\n")) == "a b;c\\d\r\n");
+static_assert(std::ranges::to<std::string>(unescaped("x\\")) == "x");
+static_assert(std::ranges::to<std::string>(unescaped("\\q")) == "q");
+static_assert(std::ranges::equal(unescaped(std::ranges::to<std::string>(escaped("any; thing \\ at all"))), std::string_view("any; thing \\ at all")));
 
 // Casemapping.
 static_assert(equal("#Mux", "#mux", casemapping::ascii));
