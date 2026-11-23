@@ -85,23 +85,10 @@ jobs:
           key: build-${{ runner.os }}-clang${{ matrix.llvm }}-${{ env.COMPILER_BUILD }}-${{ github.sha }}
           restore-keys: build-${{ runner.os }}-clang${{ matrix.llvm }}-${{ env.COMPILER_BUILD }}-
 
-      # alef is private: where the ALEF_TOKEN secret is there, git reads
-      # github.com/j4niwzis/alef with it, and cairn.precis is built on it.
-      - name: alef, where it can be read
-        env:
-          ALEF_TOKEN: ${{ secrets.ALEF_TOKEN }}
-        run: |
-          if [ -n "$ALEF_TOKEN" ]; then
-            git config --global url."https://x-access-token:${ALEF_TOKEN}@github.com/j4niwzis/alef".insteadOf "https://github.com/j4niwzis/alef"
-            echo "CAIRN_UNICODE=ON" >> "$GITHUB_ENV"
-          else
-            echo "CAIRN_UNICODE=OFF" >> "$GITHUB_ENV"
-          fi
-
       - name: build
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCAIRN_UNICODE=${{ env.CAIRN_UNICODE }} \
+            -DCAIRN_UNICODE=ON \
             -DCMAKE_CXX_COMPILER=/usr/local/bin/clang++ \
             -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
             -DCAIRN_CONSTEXPR_STEPS=2000000000 \
