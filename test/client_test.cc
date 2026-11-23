@@ -124,3 +124,31 @@ TEST(Client, RegistersWhenRun) {
   from(c, ":srv 001 frank :Welcome");
   EXPECT_TRUE(c.registered());
 }
+
+// SCRAM-SHA-256 with RFC 7677's conversation: the client's final message
+// as the RFC has it, and the server's proof taken -- run, not compiled
+// (4096 rounds of PBKDF2).
+TEST(Client, ScramSha256AsRfc7677) {
+  client c(registration{.nick = "u", .sasl = sasl::scram_sha256{"user", "pencil", "rOprNGfwEbeRWgbNEkqO"}, .caps = {}});
+  started(c);
+  from(c, ":srv CAP * LS :sasl=SCRAM-SHA-256");
+  EXPECT_EQ(from(c, ":srv CAP * ACK :sasl").sent, "AUTHENTICATE SCRAM-SHA-256\r\n");
+  const std::string first = from(c, "AUTHENTICATE +").sent;
+  EXPECT_EQ(first, "AUTHENTICATE " + crypto::base64_encode(crypto::to_bytes("n,,n=user,r=rOprNGfwEbeRWgbNEkqO")) + "\r\n");
+  const std::string server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+  const std::string asked = "AUTHENTICATE " + crypto::base64_encode(crypto::to_bytes(server_first));
+  const std::string final_sent = from(c, asked).sent;
+  EXPECT_EQ(final_sent, "AUTHENTICATE " + crypto::base64_encode(crypto::to_bytes(
+      "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=")) + "\r\n");
+  const std::string proof = "AUTHENTICATE " + crypto::base64_encode(crypto::to_bytes("v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="));
+  EXPECT_EQ(from(c, proof).sent, "AUTHENTICATE +\r\n");
+  // A server that cannot prove it: the exchange given up.
+  client d(registration{.nick = "u", .sasl = sasl::scram_sha256{"user", "pencil", "rOprNGfwEbeRWgbNEkqO"}, .caps = {}});
+  started(d);
+  from(d, ":srv CAP * LS :sasl");
+  from(d, ":srv CAP * ACK :sasl");
+  from(d, "AUTHENTICATE +");
+  from(d, asked);
+  const std::string wrong = "AUTHENTICATE " + crypto::base64_encode(crypto::to_bytes("v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="));
+  EXPECT_EQ(from(d, wrong).sent, "AUTHENTICATE *\r\n");
+}

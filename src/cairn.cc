@@ -10,6 +10,8 @@ export import cairn.casemap;
 export import cairn.isupport;
 export import cairn.messages;
 export import cairn.numerics;
+export import cairn.crypto;
+export import cairn.sasl;
 export import cairn.client;
 export import cairn.channels;
 export import cairn.format;

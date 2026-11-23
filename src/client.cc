@@ -15,6 +15,8 @@ import cairn.line;
 import cairn.read;
 import cairn.isupport;
 import cairn.messages;
+import cairn.crypto;
+import cairn.sasl;
 
 export namespace cairn {
 
@@ -24,8 +26,12 @@ namespace sasl {
 struct plain { std::string login, password; };
 // EXTERNAL: the identity the connection proved (a client certificate).
 struct external {};
+// SCRAM-SHA-256 (RFC 7677): the password never sent, the server proving it
+// knows it. The nonce the caller's (random; given, a conversation can be
+// checked).
+struct scram_sha256 { std::string login, password, nonce; std::uint32_t minimum_iterations = 4096; };
 }  // namespace sasl
-using sasl_t = spl::variant<sasl::plain, sasl::external>;
+using sasl_t = spl::variant<sasl::plain, sasl::external, sasl::scram_sha256>;
 
 struct registration {
   std::string nick;
@@ -269,7 +275,8 @@ class client {
       if (sasl && how_.sasl && negotiating_) {
         send.append("AUTHENTICATE ");
         send.append(spl::visit(spl::overloaded{[](const sasl::plain&) { return std::string_view("PLAIN"); },
-                                               [](const sasl::external&) { return std::string_view("EXTERNAL"); }},
+                                               [](const sasl::external&) { return std::string_view("EXTERNAL"); },
+                                               [](const sasl::scram_sha256&) { return std::string_view("SCRAM-SHA-256"); }},
                                *how_.sasl));
         send.append("\r\n");
         authenticating_ = true;
@@ -285,8 +292,15 @@ class client {
     }
   }
   template <class Out> constexpr void authenticate(const line_view& l, Out& send) {
-    if (l.param(0) != "+" || !how_.sasl) return;
+    if (!how_.sasl) return;
+    // SCRAM: a conversation, a step at each AUTHENTICATE.
+    if (const auto* scram = how_.sasl->template get_if<sasl::scram_sha256>()) {
+      scram_step(*scram, l.param(0), send);
+      return;
+    }
+    if (l.param(0) != "+") return;
     spl::visit(spl::overloaded{
+                   [](const sasl::scram_sha256&) {},
                    // The identity the connection proved: nothing to say.
                    [&](const sasl::external&) { send.append("AUTHENTICATE +\r\n"); },
                    // \0login\0login\0password, base64, in pieces of 400 (one of
@@ -312,6 +326,35 @@ class client {
                    }},
                *how_.sasl);
   }
+  // SCRAM-SHA-256: client-first after "+", client-final after the server's
+  // first, "+" after its final once it proved it knows the password -- or
+  // "*", the exchange given up, where it did not.
+  template <class Out> constexpr void scram_step(const sasl::scram_sha256& how, std::string_view given, Out& send) {
+    const auto say = [&](std::string_view message) {
+      send.append("AUTHENTICATE ");
+      send.append(message.empty() ? "+" : crypto::base64_encode(crypto::to_bytes(message)));
+      send.append("\r\n");
+    };
+    if (given == "+" && !scram_) {
+      scram_.emplace(how.login, how.password, how.nonce, how.minimum_iterations);
+      say(scram_->first());
+      return;
+    }
+    if (!scram_) return;
+    const auto decoded = crypto::base64_decode(given);
+    if (!decoded) return send.append("AUTHENTICATE *\r\n"), void();
+    const std::string text(decoded->begin(), decoded->end());
+    if (!scram_answered_) {
+      auto answer = scram_->answer(text);
+      if (!answer) return send.append("AUTHENTICATE *\r\n"), void();
+      scram_answered_ = true;
+      say(*answer);
+    } else {
+      if (!scram_->verify(text)) return send.append("AUTHENTICATE *\r\n"), void();
+      say({});
+    }
+  }
+
   template <class Out, class On> constexpr void numeric(const line_view& l, Out& send, On& on) {
     const int n = l.number();
     if (n == 1) {
@@ -361,6 +404,8 @@ class client {
   isupport server_;
   std::vector<open_batch> batches_;
   open_batch ended_;
+  std::optional<sasl::scram_sha256_exchange> scram_;
+  bool scram_answered_ = false;
 };
 
 }  // namespace cairn
