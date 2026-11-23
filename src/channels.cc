@@ -29,7 +29,13 @@ struct channel {
   std::vector<member> members;
   std::string topic, topic_by;
   std::string topic_at;  // as the server said it: seconds since 1970
-  std::vector<msg::mode_change> modes;  // set, with their arguments
+  // The channel's modes set, with their arguments: its own copies.
+  struct mode_set {
+    char mode = 0;
+    std::string argument;
+    friend constexpr bool operator==(const mode_set&, const mode_set&) = default;
+  };
+  std::vector<mode_set> modes;
   bool names_complete = false;          // 366 seen since the last JOIN
 };
 
@@ -58,16 +64,16 @@ class channels {
     const auto who = m.line.from ? std::string_view(m.line.from->nick) : std::string_view();
     spl::visit(spl::overloaded{
                    [&](const msg::join& j) {
-                     for (const auto& name : j.channels) {
+                     for (const std::string_view name : j.channels) {
                        if (mine(who)) {
-                         if (!find(name)) all_.push_back({name, {}, {}, {}, {}, {}, false});
+                         if (!find(name)) all_.push_back({std::string(name), {}, {}, {}, {}, {}, false});
                        } else if (auto* c = find_mut(name)) {
-                         add(*c, member{std::string(who), {}, j.account, false});
+                         add(*c, member{std::string(who), {}, std::string(j.account), false});
                        }
                      }
                    },
                    [&](const msg::part& p) {
-                     for (const auto& name : p.channels) leave(name, who);
+                     for (const std::string_view name : p.channels) leave(name, who);
                    },
                    [&](const msg::kick& k) { leave(k.channel, k.nick); },
                    [&](const msg::quit&) {
@@ -76,11 +82,11 @@ class channels {
                    [&](const msg::nick& n) {
                      if (mine(who)) me_ = n.to;
                      for (auto& c : all_)
-                       if (auto* mm = member_mut(c, who)) mm->nick = n.to;
+                       if (auto* mm = member_mut(c, who)) mm->nick = std::string(n.to);
                    },
                    [&](const msg::topic& t) {
-                     if (auto* c = find_mut(t.channel); c && t.text) {
-                       c->topic = *t.text;
+                     if (auto* c = find_mut(t.channel); c && t.body) {
+                       c->topic = std::string(*t.body);
                        c->topic_by = std::string(who);
                      }
                    },
@@ -92,7 +98,7 @@ class channels {
                          if (auto* mm = member_mut(*c, change.argument)) set_status(*mm, status->symbol, change.set);
                        } else if (change.set) {
                          std::erase_if(c->modes, [&](const auto& had) { return had.mode == change.mode && !is_list(change.mode); });
-                         c->modes.push_back(change);
+                         c->modes.push_back({change.mode, std::string(change.argument)});
                        } else {
                          std::erase_if(c->modes, [&](const auto& had) {
                            return had.mode == change.mode && (!is_list(change.mode) || had.argument == change.argument);
@@ -102,11 +108,11 @@ class channels {
                    },
                    [&](const msg::away& a) {
                      for (auto& c : all_)
-                       if (auto* mm = member_mut(c, who)) mm->away = a.text.has_value();
+                       if (auto* mm = member_mut(c, who)) mm->away = a.body.has_value();
                    },
                    [&](const msg::account& a) {
                      for (auto& c : all_)
-                       if (auto* mm = member_mut(c, who)) mm->account = a.name;
+                       if (auto* mm = member_mut(c, who)) mm->account = std::string(a.name);
                    },
                    [&](const msg::reply& r) { reply(r); },
                    [](const auto&) {}},

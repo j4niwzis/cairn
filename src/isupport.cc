@@ -75,6 +75,15 @@ struct isupport {
     if (l.params.size() < 2) return;
     for (std::size_t i = 1; i + 1 < l.params.size(); ++i) take_token(l.params[i]);
   }
+  // The same off a view: the tokens between the nick and the trailing text.
+  constexpr void take(const line_view& l) {
+    const std::size_t n = static_cast<std::size_t>(std::ranges::distance(l.params()));
+    std::size_t i = 0;
+    for (std::string_view one : l.params()) {
+      if (i > 0 && i + 1 < n) take_token(one);
+      ++i;
+    }
+  }
 
   constexpr void take_token(std::string_view one) {
     if (one.empty()) return;

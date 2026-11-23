@@ -108,6 +108,23 @@ TEST(Allocations, NoneToFoldNames) {
 }
 
 
+// A message read, its lists walked, written into room: nothing asked.
+TEST(Allocations, NoneToReadAndWriteAMessage) {
+  room out;
+  std::size_t n = 0;
+  EXPECT_EQ(asked([&] {
+    const auto m = cairn::read(*cairn::try_parse(wire));
+    if (spl::get<cairn::msg::privmsg>(m.what).body != "hello there") throw 1;
+    const auto j = cairn::read(*cairn::try_parse(":n!u@h JOIN #a,#b,#c"));
+    for (std::string_view one : spl::get<cairn::msg::join>(j.what).channels) n += one.size();
+    const auto f = cairn::read(*cairn::try_parse("FAIL X Y a b :desc"));
+    for (std::string_view one : spl::get<cairn::msg::fail>(f.what).context()) n += one.size();
+    cairn::write(cairn::msg::privmsg{"#mux", "hi there"}, out);
+  }), 0u);
+  EXPECT_EQ(n, 8u);
+  EXPECT_EQ(out.view(), "PRIVMSG #mux :hi there\r\n");
+}
+
 // The count sees what is asked: the owning API asks, and is counted.
 TEST(Allocations, TheOwningWayIsCounted) {
   EXPECT_GT(asked([] {

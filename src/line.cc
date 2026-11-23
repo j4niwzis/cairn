@@ -505,16 +505,22 @@ constexpr std::expected<void, line_error> try_write(const L& l, Out& out) {
   if (out.size() - body_from > Limits::body) return fail(errors::body_too_long{out.size() - body_from});
   return {};
 }
-template <class Limits = limits::none, class L, detail::text_sink Out> constexpr void write(const L& l, Out& out) {
+template <class Limits = limits::none, class L, detail::text_sink Out>
+  requires std::same_as<L, line> || std::same_as<L, line_view>
+constexpr void write(const L& l, Out& out) {
   if (auto done = try_write<Limits>(l, out); !done) throw line_failure(std::move(done.error()));
 }
 // Into a string of its own.
-template <class Limits = limits::none, class L> constexpr std::expected<std::string, line_error> try_write(const L& l) {
+template <class Limits = limits::none, class L>
+  requires std::same_as<L, line> || std::same_as<L, line_view>
+constexpr std::expected<std::string, line_error> try_write(const L& l) {
   std::string out;
   if (auto done = try_write<Limits>(l, out); !done) return std::unexpected(std::move(done.error()));
   return out;
 }
-template <class Limits = limits::none, class L> constexpr std::string write(const L& l) {
+template <class Limits = limits::none, class L>
+  requires std::same_as<L, line> || std::same_as<L, line_view>
+constexpr std::string write(const L& l) {
   std::string out;
   write<Limits>(l, out);
   return out;

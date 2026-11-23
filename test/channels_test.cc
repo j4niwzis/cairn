@@ -13,7 +13,7 @@ constexpr message got(std::string_view s, const isupport& server = {}) { return 
 
 static_assert([] {
   isupport server;
-  server.take(to_owned(*try_parse(":srv 005 me CASEMAPPING=rfc1459 PREFIX=(qov)~@+ CHANMODES=b,k,l,imnst :are supported")));
+  server.take(*try_parse(":srv 005 me CASEMAPPING=rfc1459 PREFIX=(qov)~@+ CHANMODES=b,k,l,imnst :are supported"));
   channels c("me");
   c.take(server);
   c.take(got(":me!u@h JOIN #Mux", server));

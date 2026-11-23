@@ -16,7 +16,7 @@ constexpr std::vector<std::string> sent(const std::vector<line>& lines) {
   for (const auto& one : lines) out.push_back(*try_write(one));
   return out;
 }
-constexpr reaction from(client& c, std::string_view text) { return c.feed(to_owned(*try_parse(text))); }
+constexpr reaction from(client& c, std::string_view text) { return c.feed(*try_parse(text)); }
 template <class E> constexpr bool happened(const reaction& r) {
   return std::ranges::any_of(r.events, [](const event_t& e) { return spl::holds_alternative<E>(e); });
 }
@@ -72,7 +72,8 @@ static_assert([] {
   const auto done = from(c, ":srv BATCH -b1");
   if (done.events.size() != 1 || !spl::holds_alternative<events::batch>(done.events[0])) return false;
   const auto& b = spl::get<events::batch>(done.events[0]);
-  return b.type == "chathistory" && b.params == std::vector<std::string>{"#mux"} && b.messages.size() == 2;
+  return b.type == "chathistory" && b.params == std::vector<std::string>{"#mux"} && b.lines.size() == 2 &&
+         try_parse(b.lines[1])->param(1) == "two";
 }());
 
 // Capabilities offered and withdrawn after registration (cap-notify).
