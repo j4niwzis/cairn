@@ -8,6 +8,9 @@ import cairn;
 #if CAIRN_SCAN
 import cairn.scan;
 #endif
+#if CAIRN_RE2C
+import cairn.re2c;
+#endif
 
 namespace {
 constexpr std::array corpus = {
@@ -47,6 +50,9 @@ int main() {
   std::println("{:<12} {:>10.1f}", "by_hand", ns_per_line<cairn::grammars::by_hand>(9, 20000));
 #if CAIRN_SCAN
   std::println("{:<12} {:>10.1f}", "scan", ns_per_line<cairn::grammars::scan>(9, 20000));
+#endif
+#if CAIRN_RE2C
+  std::println("{:<12} {:>10.1f}", "re2c", ns_per_line<cairn::grammars::re2c>(9, 20000));
 #endif
   std::println("{:<12} {:>10.1f}", "std_regex", ns_per_line<cairn::grammars::std_regex>(5, 500));
 }

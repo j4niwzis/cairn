@@ -7,6 +7,9 @@ import cairn;
 #if CAIRN_SCAN
 import cairn.scan;
 #endif
+#if CAIRN_RE2C
+import cairn.re2c;
+#endif
 import gtest;
 
 #include "gtest/gtest-macros.h"
@@ -75,6 +78,20 @@ TEST(Grammars, ScanReadsAsByHand) {
     EXPECT_TRUE(same_as_by_hand<cairn::grammars::scan>(one)) << one;
     if (const auto want = cairn::try_parse<cairn::grammars::by_hand>(one)) {
       const auto alone = cairn::grammars::scan::read_alone(one);
+      EXPECT_TRUE(alone && *alone == *want) << one;
+    }
+  }
+}
+#endif
+
+#if CAIRN_RE2C
+// The scanner re2c makes of the same description: the same lines and errors,
+// every line the walk reads read by it alone.
+TEST(Grammars, Re2cReadsAsByHand) {
+  for (std::string_view one : cases) {
+    EXPECT_TRUE(same_as_by_hand<cairn::grammars::re2c>(one)) << one;
+    if (const auto want = cairn::try_parse<cairn::grammars::by_hand>(one)) {
+      const auto alone = cairn::grammars::re2c::read_alone(one);
       EXPECT_TRUE(alone && *alone == *want) << one;
     }
   }

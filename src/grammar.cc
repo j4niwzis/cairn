@@ -222,6 +222,66 @@ template <class... N> struct ends_word<seq<N...>> : ends_word<std::tuple_element
 template <class E, class N> struct ends_word<expect<E, N>> : ends_word<N> {};
 template <auto F, class N> struct ends_word<flag<F, N>> : ends_word<N> {};
 
+// ---- as an re2c rule ------------------------------------------------------
+//
+// The description written in re2c's syntax, for re2c to make a scanner of
+// while the program is built: literals quoted, a capture between two tags
+// (@cN .. @cM, numbered in the order of the captures), no lookahead -- the
+// rule is anchored at the line's end, which says a word's end by itself.
+template <class N> struct re2c_of;
+template <class N> constexpr std::string re2c(int& tag) { return re2c_of<N>::text(tag); }
+constexpr std::string re2c_quoted(char c) {
+  if (c == '"' || c == '\\') return std::string("\"\\") + c + "\"";
+  return std::string("\"") + c + "\"";
+}
+constexpr std::string re2c_class_char(char c) {
+  if (c == ']' || c == '\\' || c == '^' || c == '-') return std::string("\\") + c;
+  return std::string(1, c);
+}
+template <char C> struct re2c_of<lit<C>> { static constexpr std::string text(int&) { return re2c_quoted(C); } };
+template <fixed_string S> struct re2c_of<not_of<S>> {
+  static constexpr std::string text(int&) {
+    std::string out = "[^\\x00\\r\\n";
+    for (char c : S.view()) out += re2c_class_char(c);
+    return out + "]";
+  }
+};
+template <> struct re2c_of<alpha> { static constexpr std::string text(int&) { return "[A-Za-z]"; } };
+template <> struct re2c_of<digit> { static constexpr std::string text(int&) { return "[0-9]"; } };
+template <class... N> struct re2c_of<seq<N...>> {
+  static constexpr std::string text(int& tag) {
+    std::string out = "(";
+    ((out += re2c<N>(tag) + " "), ...);
+    return out + ")";
+  }
+};
+template <class... N> struct re2c_of<alt<N...>> {
+  static constexpr std::string text(int& tag) {
+    std::string out = "(";
+    bool first = true;
+    ((out += (first ? "" : " | ") + re2c<N>(tag), first = false), ...);
+    return out + ")";
+  }
+};
+template <class N> struct re2c_of<opt<N>> { static constexpr std::string text(int& tag) { return "(" + re2c<N>(tag) + ")?"; } };
+template <class N> struct re2c_of<many<N>> { static constexpr std::string text(int& tag) { return "(" + re2c<N>(tag) + ")*"; } };
+template <class N> struct re2c_of<many1<N>> { static constexpr std::string text(int& tag) { return "(" + re2c<N>(tag) + ")+"; } };
+template <class N, std::size_t K> struct re2c_of<repeat<N, K>> {
+  static constexpr std::string text(int& tag) { return "(" + re2c<N>(tag) + "){" + std::to_string(K) + "}"; }
+};
+template <> struct re2c_of<rest> { static constexpr std::string text(int&) { return "[^\\x00\\r\\n]*"; } };
+template <> struct re2c_of<word_end> { static constexpr std::string text(int&) { return ""; } };
+template <auto Field, class N> struct re2c_of<capture<Field, N>> {
+  static constexpr std::string text(int& tag) {
+    const int open = tag++;
+    std::string inner = re2c<N>(tag);
+    const int close = tag++;
+    return "@c" + std::to_string(open) + " " + inner + " @c" + std::to_string(close);
+  }
+};
+template <auto Flag, class N> struct re2c_of<flag<Flag, N>> { static constexpr std::string text(int& tag) { return re2c<N>(tag); } };
+template <class E, class N> struct re2c_of<expect<E, N>> { static constexpr std::string text(int& tag) { return re2c<N>(tag); } };
+
 // The fields a piece captures into, in the order of its groups.
 template <class N> struct captures_of { using type = std::tuple<>; };
 template <class... T> using cat_t = decltype(std::tuple_cat(std::declval<T>()...));

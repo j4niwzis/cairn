@@ -13,6 +13,10 @@ option(CAIRN_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
 # build. Off, std::regex and the walk read them, with nothing but std.
 option(CAIRN_SCAN "Read lines with scan as well (cairn.scan)" ON)
 option(CAIRN_BENCHMARKS "Build the benchmarks" OFF)
+# Lines read by a scanner re2c makes of the description too (cairn.re2c):
+# the description written as an re2c rule by tools/re2c_spec.cc, re2c run
+# on it as the library is built. Needs re2c.
+option(CAIRN_RE2C "Read lines with a scanner made by re2c as well (cairn.re2c)" OFF)
 
 if(NOT COMMAND cme_find_package)
   set(CME_WITHOUT_PROVIDER ON)
@@ -61,6 +65,27 @@ if(CAIRN_SCAN)
 endif()
 add_library(cairn::cairn ALIAS cairn)
 
+if(CAIRN_RE2C)
+  find_program(CAIRN_RE2C_PROGRAM re2c REQUIRED)
+  add_executable(cairn-re2c-spec tools/re2c_spec.cc)
+  target_link_libraries(cairn-re2c-spec PRIVATE cairn)
+  set(cairn_re2c_spec ${CMAKE_CURRENT_BINARY_DIR}/re2c.re)
+  set(cairn_re2c_source ${CMAKE_CURRENT_BINARY_DIR}/re2c.cc)
+  add_custom_command(OUTPUT ${cairn_re2c_spec}
+    COMMAND cairn-re2c-spec > ${cairn_re2c_spec}
+    DEPENDS cairn-re2c-spec
+    COMMENT "cairn: the line's description as an re2c rule")
+  add_custom_command(OUTPUT ${cairn_re2c_source}
+    COMMAND ${CAIRN_RE2C_PROGRAM} -W --no-generation-date ${cairn_re2c_spec} -o ${cairn_re2c_source}
+    DEPENDS ${cairn_re2c_spec}
+    COMMENT "cairn: re2c makes the line's scanner")
+  add_library(cairn_re2c)
+  target_sources(cairn_re2c PUBLIC FILE_SET CXX_MODULES BASE_DIRS ${CMAKE_CURRENT_BINARY_DIR} FILES ${cairn_re2c_source})
+  target_link_libraries(cairn_re2c PUBLIC cairn)
+  target_compile_definitions(cairn_re2c PUBLIC CAIRN_RE2C=1)
+  add_library(cairn::re2c ALIAS cairn_re2c)
+endif()
+
 # The tests: googletest's, as a module, from cmake-everywhere, as mux's are.
 # The static_asserts in them are checked while they compile; the TESTs run.
 if(CAIRN_TESTS)
@@ -93,7 +118,7 @@ if(CAIRN_TESTS)
   endif()
   foreach(name IN ITEMS line messages grammars allocations)
     add_executable(cairn-${name}-test test/${name}_test.cc)
-    target_link_libraries(cairn-${name}-test PRIVATE cairn ${cairn_gtest})
+    target_link_libraries(cairn-${name}-test PRIVATE cairn $<$<BOOL:${CAIRN_RE2C}>:cairn_re2c> ${cairn_gtest})
     add_test(NAME ${name} COMMAND cairn-${name}-test)
   endforeach()
 endif()
@@ -101,5 +126,5 @@ endif()
 # How fast each grammar reads lines (benchmarks/parse_benchmark.cc).
 if(CAIRN_BENCHMARKS)
   add_executable(cairn-parse-benchmark benchmarks/parse_benchmark.cc)
-  target_link_libraries(cairn-parse-benchmark PRIVATE cairn)
+  target_link_libraries(cairn-parse-benchmark PRIVATE cairn $<$<BOOL:${CAIRN_RE2C}>:cairn_re2c>)
 endif()
