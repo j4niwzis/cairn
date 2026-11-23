@@ -80,12 +80,13 @@ static_assert(std::ranges::to<std::string>(unescaped("\\q")) == "q");
 static_assert(std::ranges::equal(unescaped(std::ranges::to<std::string>(escaped("any; thing \\ at all"))), std::string_view("any; thing \\ at all")));
 
 // Casemapping.
-static_assert(equal("#Mux", "#mux", casemapping::ascii));
-static_assert(equal("Nick[a]", "nick{A}", casemapping::rfc1459));
-static_assert(!equal("Nick[a]", "nick{A}", casemapping::ascii));
-static_assert(equal("a~", "A^", casemapping::rfc1459));
-static_assert(!equal("a~", "A^", casemapping::strict_rfc1459));
-static_assert(fold("#FOO\\", casemapping::rfc1459) == "#foo|");
+static_assert(equal("#Mux", "#mux", casemappings::ascii{}));
+static_assert(equal("Nick[a]", "nick{A}", casemappings::rfc1459{}));
+static_assert(!equal("Nick[a]", "nick{A}", casemappings::ascii{}));
+static_assert(equal("a~", "A^", casemappings::rfc1459{}));
+static_assert(!equal("a~", "A^", casemappings::strict_rfc1459{}));
+static_assert(std::ranges::to<std::string>(folded("#FOO\\", casemappings::rfc1459{})) == "#foo|");
+static_assert(key("#Mux[1]", casemappings::rfc1459{}) == key("#mUX{1}", casemappings::rfc1459{}));
 
 // ISUPPORT.
 constexpr isupport told(std::string_view s) {
@@ -96,7 +97,7 @@ constexpr isupport told(std::string_view s) {
 constexpr std::string_view libera =
     ":srv 005 me CASEMAPPING=ascii CHANTYPES=# PREFIX=(qaohv)~&@%+ CHANMODES=eIbq,k,flj,CFLMPQScgimnprstuz "
     "NETWORK=Libera.Chat NICKLEN=16 MONITOR=100 WHOX UTF8ONLY CHATHISTORY=50 BOT=B :are supported by this server";
-static_assert(told(libera).casemapping == casemapping::ascii);
+static_assert(std::holds_alternative<casemappings::ascii>(told(libera).casemapping));
 static_assert(told(libera).chantypes == "#");
 static_assert(told(libera).prefixes.size() == 5);
 static_assert(told(libera).by_symbol('&')->mode == 'a');

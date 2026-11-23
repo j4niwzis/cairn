@@ -28,7 +28,7 @@ struct channel_modes {
 struct isupport {
   std::vector<std::pair<std::string, std::string>> tokens;  // as given, values unescaped
 
-  cairn::casemapping casemapping = cairn::casemapping::rfc1459;
+  cairn::casemapping casemapping = casemappings::rfc1459{};
   std::string chantypes = "#&";
   std::vector<prefix_mode> prefixes{{'o', '@'}, {'v', '+'}};
   cairn::channel_modes chanmodes;
