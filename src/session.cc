@@ -176,6 +176,12 @@ template <transport T> class session {
     }
   }
 
+  // A message sent, no answer waited for.
+  constexpr void send(const message_t& what) {
+    detail::transport_sink<T> out{wire_};
+    write(what, out);
+    wire_.flush();
+  }
   constexpr client& state() { return client_; }
 
  private:

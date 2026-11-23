@@ -106,8 +106,23 @@ jobs:
             -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
             -DCAIRN_CONSTEXPR_STEPS=2000000000 \
             -DCAIRN_BENCHMARKS=ON \
-            -DCAIRN_FUZZ=ON
+            -DCAIRN_FUZZ=ON \
+            -DCAIRN_LIVE_TESTS=ON
           cmake --build build
+
+      # A real server for the live test: Ergo, its default configuration, on
+      # 127.0.0.1:6667.
+      - name: ergo
+        run: |
+          version=2.14.0
+          curl -sSL -o /tmp/ergo.tgz "https://github.com/ergochat/ergo/releases/download/v${version}/ergo-${version}-linux-x86_64.tar.gz"
+          mkdir -p /tmp/ergo && tar xzf /tmp/ergo.tgz -C /tmp/ergo --strip-components=1
+          cd /tmp/ergo
+          cp default.yaml ircd.yaml
+          ./ergo mkcerts --conf ircd.yaml
+          ./ergo initdb --conf ircd.yaml
+          nohup ./ergo run --conf ircd.yaml > ergo.log 2>&1 &
+          for i in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/6667) 2>/dev/null && break; sleep 0.2; done
 
       - name: test
         run: ctest --test-dir build --output-on-failure
