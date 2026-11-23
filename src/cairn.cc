@@ -13,6 +13,7 @@ export import cairn.numerics;
 export import cairn.crypto;
 export import cairn.sasl;
 export import cairn.client;
+export import cairn.session;
 export import cairn.channels;
 export import cairn.format;
 export import cairn.outgoing;
