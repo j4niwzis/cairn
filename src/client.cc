@@ -79,11 +79,10 @@ constexpr std::string base64(std::string_view in) {
   }
   return out;
 }
-constexpr std::vector<std::string> words(std::string_view s) {
-  std::vector<std::string> out;
-  for (auto part : s | std::views::split(' '))
-    if (!std::ranges::empty(part)) out.emplace_back(std::string_view(part));
-  return out;
+// The words of a capability list, as views into it: nothing made.
+constexpr auto words(std::string_view s) {
+  return s | std::views::split(' ') | std::views::filter([](auto part) { return !std::ranges::empty(part); }) |
+         std::views::transform([](auto part) { return std::string_view(part); });
 }
 }  // namespace detail
 
@@ -104,17 +103,18 @@ class client {
   }
 
   // A line the server sent.
-  constexpr reaction feed(const line& l) {
+  // Handed over, the line goes into what it becomes; lent, it is copied.
+  constexpr reaction feed(line&& l) {
     reaction r;
     // Inside a batch: kept until it ends.
     if (const auto ref = l.tag_value("batch"); ref && !l.is("BATCH")) {
       if (auto open = std::ranges::find(batches_, *ref, &open_batch::ref); open != batches_.end()) {
-        open->gathered.messages.push_back(read(l, server_));
+        open->gathered.messages.push_back(read(std::move(l), server_));
         return r;
       }
     }
     if (l.is("PING")) {
-      r.send.push_back(make("PONG", std::string(l.param(0))));
+      r.send.push_back(make("PONG", l.param(0)));
     } else if (l.is("CAP")) {
       cap(l, r);
     } else if (l.is("AUTHENTICATE")) {
@@ -134,14 +134,15 @@ class client {
     } else if (l.is("ERROR")) {
       r.events.push_back(events::closed{std::string(l.param(0))});
     } else if (l.numeric()) {
-      numeric(l, r);
+      numeric(std::move(l), r);
     } else {
       if (l.is("NICK") && l.from && l.from->nick == nick_) nick_ = l.param(0);
-      r.events.push_back(events::received{read(l, server_)});
+      r.events.push_back(events::received{read(std::move(l), server_)});
     }
     return r;
   }
   constexpr reaction feed(const line_view& l) { return feed(to_owned(l)); }
+  constexpr reaction feed(const line& l) { return feed(line(l)); }
 
   constexpr const std::string& nick() const { return nick_; }
   constexpr bool registered() const { return registered_; }
@@ -171,18 +172,22 @@ class client {
     const bool more = l.params.size() >= 4 && l.param(2) == "*";
     const std::string_view list = l.params.empty() ? std::string_view() : std::string_view(l.params.back());
     if (sub == "LS" || sub == "NEW") {
-      for (const auto& one : detail::words(list)) {
-        const std::string name = one.substr(0, one.find('='));
-        offered_.push_back(name);
-        if (name == "sasl") sasl_mechanisms_ = one.find('=') == std::string::npos ? std::string() : one.substr(one.find('=') + 1);
+      for (const std::string_view one : detail::words(list)) {
+        const std::string_view name = one.substr(0, one.find('='));
+        offered_.emplace_back(name);
+        if (name == "sasl" && one.find('=') != std::string_view::npos) sasl_mechanisms_ = one.substr(one.find('=') + 1);
       }
       if (more) return;
       std::string ask;
-      for (const auto& name : sub == "LS" ? offered_ : detail::words(list)) {
-        const std::string bare = name.substr(0, name.find('='));
-        if (wants(bare) && !has_cap(bare)) ask += (ask.empty() ? "" : " ") + bare;
-      }
-      if (sub == "NEW") r.events.push_back(events::caps_offered{detail::words(list)});
+      const auto consider = [&](std::string_view name) {
+        const std::string_view bare = name.substr(0, name.find('='));
+        if (wants(bare) && !has_cap(bare)) (ask += ask.empty() ? "" : " ") += bare;
+      };
+      if (sub == "LS")
+        for (const auto& name : offered_) consider(name);
+      else
+        for (const std::string_view name : detail::words(list)) consider(name);
+      if (sub == "NEW") r.events.push_back(events::caps_offered{std::ranges::to<std::vector<std::string>>(detail::words(list))});
       if (!ask.empty()) {
         r.send.push_back(make("CAP", "REQ", ask));
         ++pending_;
@@ -191,12 +196,12 @@ class client {
       }
     } else if (sub == "ACK") {
       std::vector<std::string> now;
-      for (auto& one : detail::words(list)) {
+      for (const std::string_view one : detail::words(list)) {
         if (one.starts_with('-')) {
           std::erase(enabled_, one.substr(1));
         } else {
-          enabled_.push_back(one);
-          now.push_back(one);
+          enabled_.emplace_back(one);
+          now.emplace_back(one);
         }
       }
       r.events.push_back(events::caps_enabled{now});
@@ -213,9 +218,8 @@ class client {
       if (pending_ > 0) --pending_;
       if (pending_ == 0 && !authenticating_) end_negotiation(r);
     } else if (sub == "DEL") {
-      const auto gone = detail::words(list);
-      for (const auto& one : gone) std::erase(enabled_, one);
-      r.events.push_back(events::caps_withdrawn{gone});
+      for (const std::string_view one : detail::words(list)) std::erase(enabled_, one);
+      r.events.push_back(events::caps_withdrawn{std::ranges::to<std::vector<std::string>>(detail::words(list))});
     }
   }
   constexpr void authenticate(const line& l, reaction& r) {
@@ -234,7 +238,7 @@ class client {
                    }},
                *how_.sasl);
   }
-  constexpr void numeric(const line& l, reaction& r) {
+  constexpr void numeric(line l, reaction& r) {
     const int n = l.number();
     if (n == 1) {
       registered_ = true;
@@ -259,7 +263,7 @@ class client {
       if (pending_ == 0) end_negotiation(r);
       return;
     }
-    r.events.push_back(events::received{read(l, server_)});
+    r.events.push_back(events::received{read(std::move(l), server_)});
   }
 
   registration how_;
