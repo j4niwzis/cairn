@@ -69,12 +69,15 @@ struct walk {
   std::optional<line_error> error;
 };
 
+template <class E>
+  requires std::constructible_from<E, std::string_view>
+constexpr E made_at(std::string_view rest_of_line) { return E{rest_of_line.substr(0, rest_of_line.find(' '))}; }
+template <class E> constexpr E made_at(std::string_view) { return E{}; }
+// At the end of the line: empty. Else the error, made from the word it
+// stopped at where it takes one.
 template <class E> constexpr line_error error_at(std::string_view rest_of_line) {
   if (rest_of_line.empty()) return errors::empty{};
-  if constexpr (std::is_constructible_v<E, std::string_view>)
-    return E{rest_of_line.substr(0, rest_of_line.find(' '))};
-  else
-    return E{};
+  return made_at<E>(rest_of_line);
 }
 
 template <class N> struct walker;

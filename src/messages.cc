@@ -178,56 +178,64 @@ template <shape::text Name, class T, shape::text Shape> struct command {
   static constexpr std::string_view name = Name.view();
   static constexpr auto slots = shape::slots<Shape>();
 
+  // A command with no parameters: nothing to read or write.
+  static constexpr T read(const line&)
+    requires std::is_empty_v<T>
+  {
+    return T{};
+  }
+  static constexpr line write(const T&)
+    requires std::is_empty_v<T>
+  {
+    return make(std::string(name));
+  }
   static constexpr T read(const line& l) {
     T out{};
-    if constexpr (std::is_empty_v<T>) {
-      return out;
-    } else {
     auto& [... field] = out;
     static_assert(sizeof...(field) == slots.size(), "a slot for every field of the type, and a field for every slot");
     std::size_t at = 0;
     std::size_t i = 0;
     ((take(field, slots[i++], l, at)), ...);
     return out;
-    }
   }
   static constexpr line write(const T& value) {
     line l = make(std::string(name));
-    if constexpr (!std::is_empty_v<T>) {
-      const auto& [... field] = value;
-      std::size_t i = 0;
-      ((put(field, slots[i++], l)), ...);
-    }
+    const auto& [... field] = value;
+    std::size_t i = 0;
+    ((put(field, slots[i++], l)), ...);
     return l;
   }
 
  private:
-  template <class F> static constexpr void take(F& into, shape::slot_kind kind, const line& l, std::size_t& at) {
-    const bool there = at < l.params.size();
-    if constexpr (std::same_as<F, std::string>) {
-      if (there) into = l.params[at++];
-    } else if constexpr (std::same_as<F, std::optional<std::string>>) {
-      if (there) into = l.params[at++];
-    } else if constexpr (std::same_as<F, std::vector<std::string>>) {
-      if (kind == shape::slot_kind::rest) {
-        while (at < l.params.size()) into.push_back(l.params[at++]);
-      } else if (there) {
-        into = detail::split_commas(l.params[at++]);
-      }
-    }
-  }
-  template <class F> static constexpr void put(const F& from, shape::slot_kind kind, line& l) {
-    if constexpr (std::same_as<F, std::string>) {
-      if (kind == shape::slot_kind::one || !from.empty()) l.params.push_back(from);
-    } else if constexpr (std::same_as<F, std::optional<std::string>>) {
-      if (from) l.params.push_back(*from);
-    } else if constexpr (std::same_as<F, std::vector<std::string>>) {
-      if (kind == shape::slot_kind::rest)
-        l.params.insert(l.params.end(), from.begin(), from.end());
-      else if (!from.empty() || kind == shape::slot_kind::list)
-        l.params.push_back(detail::join_commas(from));
-    }
-  }
+  // A slot read, by the type of its field: one parameter, one or none, a
+  // list at commas or every one left.
+  static constexpr auto take = spl::overloaded{
+      [](std::string& into, shape::slot_kind, const line& l, std::size_t& at) {
+        if (at < l.params.size()) into = l.params[at++];
+      },
+      [](std::optional<std::string>& into, shape::slot_kind, const line& l, std::size_t& at) {
+        if (at < l.params.size()) into = l.params[at++];
+      },
+      [](std::vector<std::string>& into, shape::slot_kind kind, const line& l, std::size_t& at) {
+        if (kind == shape::slot_kind::rest)
+          while (at < l.params.size()) into.push_back(l.params[at++]);
+        else if (at < l.params.size())
+          into = detail::split_commas(l.params[at++]);
+      }};
+  // And written: what a slot that may be left out leaves out where empty.
+  static constexpr auto put = spl::overloaded{
+      [](const std::string& from, shape::slot_kind kind, line& l) {
+        if (kind == shape::slot_kind::one || !from.empty()) l.params.push_back(from);
+      },
+      [](const std::optional<std::string>& from, shape::slot_kind, line& l) {
+        if (from) l.params.push_back(*from);
+      },
+      [](const std::vector<std::string>& from, shape::slot_kind kind, line& l) {
+        if (kind == shape::slot_kind::rest)
+          l.params.insert(l.params.end(), from.begin(), from.end());
+        else if (!from.empty() || kind == shape::slot_kind::list)
+          l.params.push_back(detail::join_commas(from));
+      }};
 };
 
 // The commands said as shapes. What a shape cannot say -- CTCP inside
@@ -292,6 +300,12 @@ template <class T, class Table = commands> struct command_of;
 template <class T, class... C> struct command_of<T, std::tuple<C...>> {
   static constexpr std::size_t count = ((std::same_as<typename C::type, T> ? 1 : 0) + ... + 0);
 };
+// The one that says it.
+template <class T, class Table = commands> struct command_for;
+template <class T, class First, class... Rest>
+struct command_for<T, std::tuple<First, Rest...>>
+    : std::conditional_t<std::same_as<typename First::type, T>, std::type_identity<First>, command_for<T, std::tuple<Rest...>>> {};
+template <class T, class Table = commands> using command_for_t = typename command_for<T, Table>::type;
 
 // MODE's changes, as ISUPPORT says which modes take an argument: "+ov-k a b c".
 constexpr std::vector<msg::mode_change> parse_modes(const std::vector<std::string>& params, std::size_t from,
@@ -368,11 +382,7 @@ constexpr line to_line(const message_t& m) {
       []<class T>(const T& x) -> line
         requires(command_of<T>::count == 1)
       {
-        line out;
-        [&]<class... C>(std::tuple<C...>*) {
-          (([&] { if constexpr (std::same_as<typename C::type, T>) out = C::write(x); }()), ...);
-        }(static_cast<commands*>(nullptr));
-        return out;
+        return command_for_t<T>::write(x);
       },
       [](const msg::privmsg& x) { return make("PRIVMSG", x.target, x.text); },
       [](const msg::notice& x) { return make("NOTICE", x.target, x.text); },

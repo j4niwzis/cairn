@@ -202,7 +202,9 @@ class client {
       r.events.push_back(events::caps_enabled{now});
       if (pending_ > 0) --pending_;
       if (std::ranges::find(now, "sasl") != now.end() && how_.sasl && negotiating_) {
-        r.send.push_back(make("AUTHENTICATE", spl::holds_alternative<sasl::external>(*how_.sasl) ? "EXTERNAL" : "PLAIN"));
+        r.send.push_back(make("AUTHENTICATE", spl::visit(spl::overloaded{[](const sasl::plain&) { return "PLAIN"; },
+                                                                        [](const sasl::external&) { return "EXTERNAL"; }},
+                                                         *how_.sasl)));
         authenticating_ = true;
       } else if (pending_ == 0 && !authenticating_) {
         end_negotiation(r);
@@ -218,17 +220,19 @@ class client {
   }
   constexpr void authenticate(const line& l, reaction& r) {
     if (l.param(0) != "+" || !how_.sasl) return;
-    if (spl::holds_alternative<sasl::external>(*how_.sasl)) {
-      r.send.push_back(make("AUTHENTICATE", "+"));
-      return;
-    }
-    const auto& plain = spl::get<sasl::plain>(*how_.sasl);
-    std::string payload;
-    payload += plain.login, payload += '\0', payload += plain.login, payload += '\0', payload += plain.password;
-    const std::string encoded = detail::base64(payload);
-    // In pieces of 400; one of exactly 400 followed by "+".
-    for (std::size_t at = 0; at < encoded.size(); at += 400) r.send.push_back(make("AUTHENTICATE", encoded.substr(at, 400)));
-    if (encoded.empty() || encoded.size() % 400 == 0) r.send.push_back(make("AUTHENTICATE", "+"));
+    spl::visit(spl::overloaded{
+                   // The identity the connection proved: nothing to say.
+                   [&](const sasl::external&) { r.send.push_back(make("AUTHENTICATE", "+")); },
+                   [&](const sasl::plain& plain) {
+                     std::string payload;
+                     payload += plain.login, payload += '\0', payload += plain.login, payload += '\0', payload += plain.password;
+                     const std::string encoded = detail::base64(payload);
+                     // In pieces of 400; one of exactly 400 followed by "+".
+                     for (std::size_t at = 0; at < encoded.size(); at += 400)
+                       r.send.push_back(make("AUTHENTICATE", encoded.substr(at, 400)));
+                     if (encoded.empty() || encoded.size() % 400 == 0) r.send.push_back(make("AUTHENTICATE", "+"));
+                   }},
+               *how_.sasl);
   }
   constexpr void numeric(const line& l, reaction& r) {
     const int n = l.number();

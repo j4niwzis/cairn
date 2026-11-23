@@ -165,13 +165,15 @@ template <class S> struct basic_tag {
   S key;
   S text;
   constexpr bool client_only() const { return !key.empty() && key.front() == '+'; }
-  // Its value, unescaped: a view either way.
-  constexpr auto value() const {
-    if constexpr (std::same_as<S, std::string_view>)
-      return unescaped(text);
-    else
-      return std::string_view(text);
-  }
+  // Its value, unescaped: a view either way -- of the wire's text, read
+  // through as it is walked; of a line's own, as it is.
+  constexpr auto value() const { return value_of(text); }
+
+ private:
+  static constexpr unescaped_view value_of(std::string_view escaped_text) { return unescaped(escaped_text); }
+  static constexpr std::string_view value_of(const std::string& own) { return own; }
+
+ public:
   friend constexpr bool operator==(const basic_tag&, const basic_tag&) = default;
 };
 
@@ -400,20 +402,58 @@ concept text_sink = requires(T& out, std::string_view s, char c, std::size_t n) 
   out.push_back(c);
   out.resize(n);
 };
-template <class Out> constexpr bool put(Out& out, std::string_view s) {
-  if constexpr (std::same_as<Out, std::string>) return out.append(s), true;
-  else return out.append(s);
-}
-template <class Out> constexpr bool put(Out& out, char c) {
-  if constexpr (std::same_as<Out, std::string>) return out.push_back(c), true;
-  else return out.push_back(c);
-}
+// A std::string takes all of it; a sink of the caller's says whether it did.
+constexpr bool put(std::string& out, std::string_view s) { return out.append(s), true; }
+constexpr bool put(std::string& out, char c) { return out.push_back(c), true; }
+template <class Out> constexpr bool put(Out& out, std::string_view s) { return out.append(s); }
+template <class Out> constexpr bool put(Out& out, char c) { return out.push_back(c); }
 template <class Out, class R> constexpr bool put_range(Out& out, R&& r) {
   for (char c : r)
     if (!put(out, c)) return false;
   return true;
 }
 template <class Out> constexpr void cut(Out& out, std::size_t n) { out.resize(n); }
+}  // namespace detail
+
+namespace detail {
+constexpr bool clean(std::string_view s) {
+  return std::ranges::none_of(s, [](char c) { return c == '\r' || c == '\n' || c == '\0'; });
+}
+// What a line has to write, by what it is: a view's tags read off their
+// text, a line's its own.
+constexpr auto tags_to_write(const line_view& l) { return l.tags(); }
+constexpr auto tags_to_write(const line& l) { return std::views::all(l.tags); }
+// A tag's value: a view's as the wire had it (found well-formed), a line's
+// escaped as it goes. Whether it could be written.
+template <class Out> constexpr bool write_tag_value(const tag_view& t, Out& out, bool& fits) {
+  if (!clean(t.text) || t.text.find_first_of(" ;") != std::string_view::npos) return false;
+  fits &= put(out, t.text);
+  return true;
+}
+template <class Out> constexpr bool write_tag_value(const tag& t, Out& out, bool& fits) {
+  fits &= put_range(out, escaped(t.text));
+  return true;
+}
+// The parameters: a view's as the wire had them; a line's one by one, the
+// last after ':' where it has to be. What is wrong with them, where anything is.
+template <class Out> constexpr std::optional<line_error> write_params(const line_view& l, Out& out, bool& fits) {
+  if (!clean(l.params_text)) return errors::bad_character{};
+  fits &= put(out, l.params_text);
+  return std::nullopt;
+}
+template <class Out> constexpr std::optional<line_error> write_params(const line& l, Out& out, bool& fits) {
+  for (std::size_t i = 0; i < l.params.size(); ++i) {
+    const std::string_view p = l.params[i];
+    if (!clean(p)) return errors::bad_character{};
+    const bool last = i + 1 == l.params.size();
+    const bool needs_colon = p.empty() || p.front() == ':' || p.find(' ') != std::string_view::npos;
+    if (needs_colon && !last) return errors::bad_parameter{i};
+    fits &= put(out, ' ');
+    if (needs_colon) fits &= put(out, ':');
+    fits &= put(out, p);
+  }
+  return std::nullopt;
+}
 }  // namespace detail
 
 template <class Limits = limits::none, class L, class Out>
@@ -428,10 +468,7 @@ constexpr std::expected<void, line_error> try_write(const L& l, Out& out) {
   const auto clean = [](std::string_view s) {
     return std::ranges::none_of(s, [](char c) { return c == '\r' || c == '\n' || c == '\0'; });
   };
-  constexpr bool raw = std::same_as<L, line_view>;
-  auto tag_list = [&] {
-    if constexpr (raw) return l.tags(); else return std::views::all(l.tags);
-  }();
+  auto tag_list = detail::tags_to_write(l);
   if (std::ranges::begin(tag_list) != std::ranges::end(tag_list)) {
     fits &= detail::put(out, '@');
     bool first = true;
@@ -443,12 +480,7 @@ constexpr std::expected<void, line_error> try_write(const L& l, Out& out) {
       fits &= detail::put(out, key);
       if (!t.text.empty()) {
         fits &= detail::put(out, '=');
-        if constexpr (raw) {
-          if (!clean(t.text) || t.text.find_first_of(" ;") != std::string_view::npos) return fail(errors::bad_character{});
-          fits &= detail::put(out, t.text);
-        } else {
-          fits &= detail::put_range(out, escaped(t.text));
-        }
+        if (!detail::write_tag_value(t, out, fits)) return fail(errors::bad_character{});
       }
     }
     fits &= detail::put(out, ' ');
@@ -467,22 +499,7 @@ constexpr std::expected<void, line_error> try_write(const L& l, Out& out) {
   }
   if (!detail::command_ok(l.command)) return fail(errors::bad_command{l.command});
   fits &= detail::put(out, l.command);
-  if constexpr (raw) {
-    // As the wire had them, read and found well-formed: written as they are.
-    if (!clean(l.params_text)) return fail(errors::bad_character{});
-    fits &= detail::put(out, l.params_text);
-  } else {
-    for (std::size_t i = 0; i < l.params.size(); ++i) {
-      const std::string_view p = l.params[i];
-      if (!clean(p)) return fail(errors::bad_character{});
-      const bool last = i + 1 == l.params.size();
-      const bool needs_colon = p.empty() || p.front() == ':' || p.find(' ') != std::string_view::npos;
-      if (needs_colon && !last) return fail(errors::bad_parameter{i});
-      fits &= detail::put(out, ' ');
-      if (needs_colon) fits &= detail::put(out, ':');
-      fits &= detail::put(out, p);
-    }
-  }
+  if (auto wrong = detail::write_params(l, out, fits)) return fail(std::move(*wrong));
   fits &= detail::put(out, "\r\n");
   if (!fits) return fail(errors::too_long_to_read{});
   if (out.size() - body_from > Limits::body) return fail(errors::body_too_long{out.size() - body_from});
