@@ -59,6 +59,9 @@ struct commas {
 // walked lazily.
 struct params_rest {
   std::string_view raw;
+  // Or, to write, the parameters one by one -- the caller's -- the last
+  // after ':' where it has to be.
+  std::span<const std::string_view> list;
   constexpr detail::params_view items() const { return detail::params_view(raw); }
   constexpr auto begin() const { return items().begin(); }
   constexpr auto end() const { return items().end(); }
@@ -105,7 +108,16 @@ struct mode_change {
 };
 // The changes of a MODE, read as they are walked: "+ov-k a b c", which
 // modes take an argument as the server said (ISUPPORT).
-class mode_changes : public std::ranges::view_interface<mode_changes> {
+class mode_changes_view;
+// The changes of a MODE as they came: walked with what the server said of
+// itself, given as they are walked -- changes(server) -- not kept.
+struct mode_changes {
+  params_rest raw;  // the letters, then the arguments
+  bool channel = false;
+  constexpr mode_changes_view walk(const isupport& server) const;
+  friend constexpr bool operator==(const mode_changes&, const mode_changes&) = default;
+};
+class mode_changes_view : public std::ranges::view_interface<mode_changes_view> {
  public:
   class iterator {
    public:
@@ -134,7 +146,7 @@ class mode_changes : public std::ranges::view_interface<mode_changes> {
       }
       current_ = {set_, letters_.front(), {}};
       letters_.remove_prefix(1);
-      if (channel_ && server_ && server_->takes_argument(current_.mode, set_) && !(args_ == std::default_sentinel)) {
+      if (channel_ && server_->takes_argument(current_.mode, set_) && !(args_ == std::default_sentinel)) {
         current_.argument = *args_;
         ++args_;
       }
@@ -145,8 +157,7 @@ class mode_changes : public std::ranges::view_interface<mode_changes> {
     bool channel_ = false, set_ = true, done_ = false;
     mode_change current_;
   };
-  constexpr mode_changes() = default;
-  constexpr mode_changes(params_rest rest, const isupport* server, bool channel) : rest_(rest), server_(server), channel_(channel) {}
+  constexpr mode_changes_view(params_rest rest, const isupport& server, bool channel) : rest_(rest), server_(&server), channel_(channel) {}
   constexpr iterator begin() const {
     auto args = rest_.items().begin();
     std::string_view letters;
@@ -154,14 +165,22 @@ class mode_changes : public std::ranges::view_interface<mode_changes> {
     return iterator(letters, args, server_, channel_);
   }
   constexpr std::default_sentinel_t end() const { return {}; }
-  constexpr const params_rest& raw() const { return rest_; }
 
  private:
   params_rest rest_;
-  const isupport* server_ = nullptr;
-  bool channel_ = false;
+  const isupport* server_;
+  bool channel_;
 };
-struct mode { text target; mode_changes changes; };
+constexpr mode_changes_view mode_changes::walk(const isupport& server) const { return mode_changes_view(raw, server, channel); }
+struct mode {
+  text target;
+  mode_changes changes;
+  // The changes, walked with the server's word on which modes take an
+  // argument (a channel's; a user's modes take none).
+  constexpr mode_changes_view changes_with(const isupport& server) const {
+    return mode_changes_view(changes.raw, server, server.is_channel(target));
+  }
+};
 
 struct away { std::optional<text> body; };  // away-notify; none: back
 struct account { text name; };               // account-notify; "*": logged out
@@ -369,7 +388,7 @@ template <shape::text Name, class T, shape::text Shape> struct command {
       [](std::string_view from, shape::slot_kind kind) { return kind == shape::slot_kind::one || !from.empty(); },
       [](const std::optional<std::string_view>& from, shape::slot_kind) { return from.has_value(); },
       [](const commas& from, shape::slot_kind kind) { return kind == shape::slot_kind::list || !from.empty(); },
-      [](const params_rest& from, shape::slot_kind) { return !from.raw.empty(); }};
+      [](const params_rest& from, shape::slot_kind) { return !from.raw.empty() || !from.list.empty(); }};
   static constexpr auto put = spl::overloaded{
       []<class Out>(std::string_view from, shape::slot_kind kind, Out& out, std::size_t said, std::size_t& n) {
         if (kind == shape::slot_kind::one || !from.empty()) detail::param(out, from, ++n == said);
@@ -382,8 +401,9 @@ template <shape::text Name, class T, shape::text Shape> struct command {
       },
       // As the wire has them already: written as they are.
       []<class Out>(const params_rest& from, shape::slot_kind, Out& out, std::size_t, std::size_t& n) {
-        if (from.raw.empty()) return;
         ++n;
+        for (std::size_t i = 0; i < from.list.size(); ++i) detail::param(out, from.list[i], i + 1 == from.list.size());
+        if (from.raw.empty()) return;
         out.push_back(' ');
         out.append(from.raw);
       }};
@@ -455,10 +475,8 @@ struct command_for<T, std::tuple<First, Rest...>>
     : std::conditional_t<std::same_as<typename First::type, T>, std::type_identity<First>, command_for<T, std::tuple<Rest...>>> {};
 template <class T, class Table = commands> using command_for_t = typename command_for<T, Table>::type;
 
-// What a line says. The server's ISUPPORT, where given, says which modes
-// take an argument; the message keeps a pointer to it for walking MODE's
-// changes, as it keeps views into the line.
-constexpr message read(const line_view& l, const isupport* server = nullptr) {
+// What a line says: views into it.
+constexpr message read(const line_view& l) {
   const auto p = [&](std::size_t i) { return l.param(i); };
   message_t what = msg::unknown{};
   if (l.numeric()) {
@@ -478,7 +496,7 @@ constexpr message read(const line_view& l, const isupport* server = nullptr) {
     if (!detail::rest_from(l, 2).raw.empty()) what = msg::join{commas{p(0)}, {}, p(1), p(2)};
     else what = msg::join{commas{p(0)}, commas{p(1)}, {}, {}};
   } else if (l.is("MODE")) {
-    what = msg::mode{p(0), msg::mode_changes(detail::rest_from(l, 1), server, server && server->is_channel(p(0)))};
+    what = msg::mode{p(0), msg::mode_changes{detail::rest_from(l, 1), false}};
   } else if (l.is("FAIL")) {
     what = msg::fail{{p(0), p(1), detail::rest_from(l, 2)}};
   } else if (l.is("WARN")) {
@@ -497,7 +515,9 @@ constexpr message read(const line_view& l, const isupport* server = nullptr) {
   }
   return {std::move(what), l};
 }
-constexpr message read(const line_view& l, const isupport& server) { return read(l, &server); }
+// (The server's word is asked where it is needed -- MODE's changes_with --
+// not kept.)
+constexpr message read(const line_view& l, const isupport&) { return read(l); }
 
 // A message written as a line, CR LF ended, into anything that appends --
 // what a client sends; a reply, an unknown and a batch's end are lines of
@@ -542,8 +562,8 @@ template <class Out> constexpr void write(const message_t& m, Out& out) {
                  },
                  [&](const msg::mode& x) {
                    out.append("MODE");
-                   detail::param(out, x.target, x.changes.raw().raw.empty());
-                   if (!x.changes.raw().raw.empty()) out.push_back(' '), out.append(x.changes.raw().raw);
+                   detail::param(out, x.target, x.changes.raw.raw.empty());
+                   if (!x.changes.raw.raw.empty()) out.push_back(' '), out.append(x.changes.raw.raw);
                    out.append("\r\n");
                  },
                  [&]<class R>(const R& x)

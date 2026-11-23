@@ -28,7 +28,7 @@ template <class R> constexpr std::vector<std::string> strings(const R& r) {
 constexpr std::vector<msg::mode_change> changes(std::string_view s) {
   const isupport server = server_of();
   const auto m = read(*try_parse(s), server);
-  return std::ranges::to<std::vector<msg::mode_change>>(spl::get<msg::mode>(m.what).changes);
+  return std::ranges::to<std::vector<msg::mode_change>>(spl::get<msg::mode>(m.what).changes_with(server));
 }
 using v = std::vector<std::string>;
 
@@ -92,6 +92,15 @@ static_assert(write(msg::part{commas{"#a"}, "bye now"}) == "PART #a :bye now\r\n
 static_assert(write(msg::quit{}) == "QUIT\r\n");
 static_assert(write(msg::topic{"#a", "new topic"}) == "TOPIC #a :new topic\r\n");
 static_assert(write(msg::cap{"REQ", params_rest{":sasl server-time"}}) == "CAP REQ :sasl server-time\r\n");
+// Parameters given one by one: the colon where it has to be, by itself.
+static_assert([] {
+  constexpr std::array<std::string_view, 1> caps{"sasl server-time"};
+  return write(msg::cap{"REQ", params_rest{{}, caps}}) == "CAP REQ :sasl server-time\r\n";
+}());
+static_assert([] {
+  constexpr std::array<std::string_view, 3> p{"#mux", "*", "100"};
+  return write(msg::chathistory{"LATEST", params_rest{{}, p}}) == "CHATHISTORY LATEST #mux * 100\r\n";
+}());
 static_assert(write(msg::pong{"irc.example.com"}) == "PONG irc.example.com\r\n");
 static_assert(write(msg::user{"alice", "0", "*", "Alice A"}) == "USER alice 0 * :Alice A\r\n");
 static_assert(write(msg::rehash{}) == "REHASH\r\n");

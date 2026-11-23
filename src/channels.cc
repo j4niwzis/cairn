@@ -93,7 +93,7 @@ class channels {
                    [&](const msg::mode& md) {
                      auto* c = find_mut(md.target);
                      if (!c) return;
-                     for (const auto& change : md.changes) {
+                     for (const auto& change : md.changes_with(server_)) {
                        if (const auto status = server_.by_mode(change.mode)) {
                          if (auto* mm = member_mut(*c, change.argument)) set_status(*mm, status->symbol, change.set);
                        } else if (change.set) {
