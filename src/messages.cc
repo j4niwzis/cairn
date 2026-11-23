@@ -55,29 +55,47 @@ struct commas {
   friend constexpr bool operator==(const commas& a, const commas& b) { return std::ranges::equal(a, b); }
 };
 
-// The parameters from one on, as the wire has them (the last after ':'),
-// walked lazily.
+// The parameters from one on: as the wire has them (raw, the last after ':'),
+// walked lazily -- or, to write, the caller's one by one (list). Whichever
+// it holds, each() walks it, and size, [], back and == go through each(),
+// so a read one and a written one with the same parameters are equal.
 struct params_rest {
   std::string_view raw;
-  // Or, to write, the parameters one by one -- the caller's -- the last
-  // after ':' where it has to be.
   std::span<const std::string_view> list;
+  constexpr bool listed() const { return raw.empty() && !list.empty(); }
+  template <class F> constexpr void each(F f) const {
+    if (listed())
+      for (std::string_view one : list) f(one);
+    else
+      for (std::string_view one : detail::params_view(raw)) f(one);
+  }
+  // Walking as a range: the wire form's (a list is walked with each()).
   constexpr detail::params_view items() const { return detail::params_view(raw); }
   constexpr auto begin() const { return items().begin(); }
   constexpr auto end() const { return items().end(); }
-  constexpr bool empty() const { return items().begin() == items().end(); }
-  constexpr std::size_t size() const { return static_cast<std::size_t>(std::ranges::distance(items())); }
+  constexpr std::size_t size() const {
+    std::size_t n = 0;
+    each([&](std::string_view) { ++n; });
+    return n;
+  }
+  constexpr bool empty() const { return size() == 0; }
   constexpr std::string_view operator[](std::size_t i) const {
-    for (std::string_view one : items())
-      if (i-- == 0) return one;
-    return {};
+    std::string_view got;
+    each([&](std::string_view one) { if (i-- == 0) got = one; });
+    return got;
   }
   constexpr std::string_view back() const {
     std::string_view last;
-    for (std::string_view one : items()) last = one;
+    each([&](std::string_view one) { last = one; });
     return last;
   }
-  friend constexpr bool operator==(const params_rest& a, const params_rest& b) { return std::ranges::equal(a.items(), b.items()); }
+  friend constexpr bool operator==(const params_rest& a, const params_rest& b) {
+    if (a.size() != b.size()) return false;
+    std::size_t i = 0;
+    bool same = true;
+    a.each([&](std::string_view one) { same = same && one == b[i++]; });
+    return same;
+  }
 };
 
 namespace msg {

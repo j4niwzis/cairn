@@ -92,6 +92,11 @@ static_assert(write(msg::part{commas{"#a"}, "bye now"}) == "PART #a :bye now\r\n
 static_assert(write(msg::quit{}) == "QUIT\r\n");
 static_assert(write(msg::topic{"#a", "new topic"}) == "TOPIC #a :new topic\r\n");
 static_assert(write(msg::cap{"REQ", params_rest{":sasl server-time"}}) == "CAP REQ :sasl server-time\r\n");
+// A read one and a written one with the same parameters are the same.
+static_assert([] {
+  const std::array<std::string_view, 2> p{"#mux", "hello there"};
+  return params_rest{"#mux :hello there"} == params_rest{{}, p} && params_rest{"#mux :other"} != params_rest{{}, p};
+}());
 // Parameters given one by one: the colon where it has to be, by itself.
 static_assert([] {
   constexpr std::array<std::string_view, 1> caps{"sasl server-time"};
